@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# CareerLens local data
+data/careerlens.db
+data/careerlens.db-journal
+data/careerlens.db-shm
+data/careerlens.db-wal
