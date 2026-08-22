@@ -1,5 +1,6 @@
 """SQLite setup for the local CareerLens database."""
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -90,6 +91,89 @@ def initialize_database(database_path: str | Path = DATABASE_PATH) -> None:
     try:
         connection.executescript(SCHEMA)
         connection.execute("INSERT OR IGNORE INTO user_profile (id) VALUES (1)")
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _normalize_target_roles(target_roles: list[str]) -> list[str]:
+    """Return trimmed, non-empty role names without duplicates."""
+    normalized_roles = []
+    seen_roles = set()
+
+    for role in target_roles:
+        if not isinstance(role, str):
+            continue
+
+        normalized_role = role.strip()
+        if normalized_role and normalized_role not in seen_roles:
+            normalized_roles.append(normalized_role)
+            seen_roles.add(normalized_role)
+
+    return normalized_roles
+
+
+def _deserialize_target_roles(target_roles_json: str) -> list[str]:
+    """Safely convert stored JSON text into a normalized list of roles."""
+    try:
+        target_roles = json.loads(target_roles_json)
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+    if not isinstance(target_roles, list):
+        return []
+
+    return _normalize_target_roles(target_roles)
+
+
+def get_user_profile(
+    database_path: str | Path = DATABASE_PATH,
+) -> dict[str, object]:
+    """Return the singleton user profile with target roles as a Python list."""
+    connection = get_connection(database_path)
+    try:
+        profile = connection.execute(
+            """
+            SELECT target_roles, free_notes, created_at, updated_at
+            FROM user_profile
+            WHERE id = 1
+            """
+        ).fetchone()
+    finally:
+        connection.close()
+
+    if profile is None:
+        raise sqlite3.DatabaseError("The singleton user profile is missing.")
+
+    return {
+        "target_roles": _deserialize_target_roles(profile[0]),
+        "free_notes": profile[1],
+        "created_at": profile[2],
+        "updated_at": profile[3],
+    }
+
+
+def update_user_profile(
+    target_roles: list[str],
+    free_notes: str,
+    database_path: str | Path = DATABASE_PATH,
+) -> None:
+    """Update the singleton user profile and its modification timestamp."""
+    normalized_roles = _normalize_target_roles(target_roles)
+    target_roles_json = json.dumps(normalized_roles, ensure_ascii=False)
+
+    connection = get_connection(database_path)
+    try:
+        cursor = connection.execute(
+            """
+            UPDATE user_profile
+            SET target_roles = ?, free_notes = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = 1
+            """,
+            (target_roles_json, free_notes),
+        )
+        if cursor.rowcount != 1:
+            raise sqlite3.DatabaseError("The singleton user profile is missing.")
         connection.commit()
     finally:
         connection.close()
