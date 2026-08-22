@@ -177,3 +177,205 @@ def update_user_profile(
         connection.commit()
     finally:
         connection.close()
+
+
+def _normalize_job_axis_order(connection: sqlite3.Connection) -> None:
+    """Renumber job axes sequentially using their current order and IDs."""
+    axis_ids = connection.execute(
+        "SELECT id FROM job_axes ORDER BY display_order, id"
+    ).fetchall()
+
+    for display_order, (axis_id,) in enumerate(axis_ids, start=1):
+        connection.execute(
+            "UPDATE job_axes SET display_order = ? WHERE id = ?",
+            (display_order, axis_id),
+        )
+
+
+def _validate_job_axis(criterion: str, description: str) -> tuple[str, str]:
+    """Trim job-axis input and require a non-empty criterion name."""
+    normalized_criterion = criterion.strip()
+    if not normalized_criterion:
+        raise ValueError("A job-search criterion name is required.")
+
+    return normalized_criterion, description.strip()
+
+
+def list_job_axes(
+    database_path: str | Path = DATABASE_PATH,
+) -> list[dict[str, object]]:
+    """Return all job axes in the user's saved priority order."""
+    connection = get_connection(database_path)
+    try:
+        axes = connection.execute(
+            """
+            SELECT id, criterion, description, display_order, created_at, updated_at
+            FROM job_axes
+            ORDER BY display_order, id
+            """
+        ).fetchall()
+    finally:
+        connection.close()
+
+    return [
+        {
+            "id": axis[0],
+            "criterion": axis[1],
+            "description": axis[2],
+            "display_order": axis[3],
+            "created_at": axis[4],
+            "updated_at": axis[5],
+        }
+        for axis in axes
+    ]
+
+
+def create_job_axis(
+    criterion: str,
+    description: str = "",
+    database_path: str | Path = DATABASE_PATH,
+) -> int:
+    """Create a job axis at the end of the current priority order."""
+    normalized_criterion, normalized_description = _validate_job_axis(
+        criterion, description
+    )
+
+    connection = get_connection(database_path)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        _normalize_job_axis_order(connection)
+        next_order = connection.execute(
+            "SELECT COUNT(*) + 1 FROM job_axes"
+        ).fetchone()[0]
+        cursor = connection.execute(
+            """
+            INSERT INTO job_axes (criterion, description, display_order)
+            VALUES (?, ?, ?)
+            """,
+            (normalized_criterion, normalized_description, next_order),
+        )
+        connection.commit()
+        return cursor.lastrowid
+    except sqlite3.Error:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def update_job_axis(
+    axis_id: int,
+    criterion: str,
+    description: str,
+    database_path: str | Path = DATABASE_PATH,
+) -> None:
+    """Update a job axis and its modification timestamp."""
+    normalized_criterion, normalized_description = _validate_job_axis(
+        criterion, description
+    )
+
+    connection = get_connection(database_path)
+    try:
+        cursor = connection.execute(
+            """
+            UPDATE job_axes
+            SET criterion = ?, description = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (normalized_criterion, normalized_description, axis_id),
+        )
+        if cursor.rowcount != 1:
+            raise sqlite3.DatabaseError("The job-search criterion was not found.")
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def delete_job_axis(
+    axis_id: int,
+    database_path: str | Path = DATABASE_PATH,
+) -> None:
+    """Delete a job axis and close any gap in the saved order."""
+    connection = get_connection(database_path)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        cursor = connection.execute("DELETE FROM job_axes WHERE id = ?", (axis_id,))
+        if cursor.rowcount != 1:
+            raise sqlite3.DatabaseError("The job-search criterion was not found.")
+        _normalize_job_axis_order(connection)
+        connection.commit()
+    except sqlite3.Error:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def _move_job_axis(
+    axis_id: int,
+    direction: int,
+    database_path: str | Path,
+) -> bool:
+    """Swap a job axis with its adjacent item, returning whether it moved."""
+    connection = get_connection(database_path)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        _normalize_job_axis_order(connection)
+        current_axis = connection.execute(
+            "SELECT display_order FROM job_axes WHERE id = ?", (axis_id,)
+        ).fetchone()
+        if current_axis is None:
+            raise sqlite3.DatabaseError("The job-search criterion was not found.")
+
+        current_order = current_axis[0]
+        target_order = current_order + direction
+        target_axis = connection.execute(
+            "SELECT id FROM job_axes WHERE display_order = ?", (target_order,)
+        ).fetchone()
+
+        if target_axis is None:
+            connection.commit()
+            return False
+
+        target_axis_id = target_axis[0]
+        connection.execute(
+            """
+            UPDATE job_axes
+            SET display_order = CASE id
+                WHEN ? THEN ?
+                WHEN ? THEN ?
+            END
+            WHERE id IN (?, ?)
+            """,
+            (
+                axis_id,
+                target_order,
+                target_axis_id,
+                current_order,
+                axis_id,
+                target_axis_id,
+            ),
+        )
+        connection.commit()
+        return True
+    except sqlite3.Error:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
+
+
+def move_job_axis_up(
+    axis_id: int,
+    database_path: str | Path = DATABASE_PATH,
+) -> bool:
+    """Move a job axis one position earlier in the priority order."""
+    return _move_job_axis(axis_id, -1, database_path)
+
+
+def move_job_axis_down(
+    axis_id: int,
+    database_path: str | Path = DATABASE_PATH,
+) -> bool:
+    """Move a job axis one position later in the priority order."""
+    return _move_job_axis(axis_id, 1, database_path)

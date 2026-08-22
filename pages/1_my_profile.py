@@ -6,8 +6,14 @@ import sqlite3
 import streamlit as st
 
 from careerlens.database import (
+    create_job_axis,
+    delete_job_axis,
     get_user_profile,
     initialize_database,
+    list_job_axes,
+    move_job_axis_down,
+    move_job_axis_up,
+    update_job_axis,
     update_user_profile,
 )
 
@@ -61,6 +67,26 @@ def render_saved_profile(profile: dict[str, object]) -> None:
         </section>
         """
     )
+
+
+def set_axis_feedback(message: str, message_type: str = "success") -> None:
+    """Keep one job-axis feedback message across a Streamlit rerun."""
+    st.session_state["axis_feedback"] = {
+        "message": message,
+        "type": message_type,
+    }
+
+
+def show_axis_feedback() -> None:
+    """Display and clear a pending job-axis feedback message."""
+    feedback = st.session_state.pop("axis_feedback", None)
+    if not feedback:
+        return
+
+    if feedback["type"] == "success":
+        st.success(feedback["message"])
+    else:
+        st.error(feedback["message"])
 
 
 st.set_page_config(page_title="My Profile | CareerLens", page_icon="🔎", layout="wide")
@@ -156,7 +182,7 @@ st.html(
             border-color: var(--cl-border);
         }
 
-        [data-testid="stFormSubmitButton"] button {
+        [data-testid="stBaseButton-primary"] {
             min-height: 2.65rem;
             padding-left: 1.4rem;
             padding-right: 1.4rem;
@@ -219,6 +245,130 @@ st.html(
             font-weight: 400;
         }
 
+        .axes-section-header {
+            margin: 4.75rem 0 1.6rem;
+            color: var(--cl-navy);
+            font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans",
+                "Yu Gothic UI", "Yu Gothic", "Noto Sans JP", sans-serif;
+        }
+
+        .axes-section-header h2 {
+            margin: 0.5rem 0 0;
+            font-size: clamp(1.85rem, 4vw, 2.45rem);
+            font-weight: 750;
+            letter-spacing: -0.035em;
+        }
+
+        .axes-section-copy {
+            margin: 0.8rem 0 0;
+            color: var(--cl-slate);
+            font-size: 0.96rem;
+            line-height: 1.8;
+        }
+
+        .axes-order-note {
+            margin: 0.75rem 0 0;
+            color: var(--cl-muted);
+            font-size: 0.8rem;
+            line-height: 1.6;
+        }
+
+        .axes-list-heading {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1rem;
+            margin: 2.5rem 0 1rem;
+            color: var(--cl-navy);
+            font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans",
+                "Yu Gothic UI", "Yu Gothic", "Noto Sans JP", sans-serif;
+        }
+
+        .axes-list-heading h3 {
+            margin: 0;
+            font-size: 1.12rem;
+            font-weight: 700;
+        }
+
+        .axes-count {
+            color: var(--cl-muted);
+            font-size: 0.78rem;
+            font-weight: 650;
+        }
+
+        div[data-testid="stVerticalBlockBorderWrapper"] {
+            background: var(--cl-surface);
+            border-color: var(--cl-border);
+            border-radius: 14px;
+        }
+
+        .axis-card-header {
+            display: flex;
+            align-items: flex-start;
+            gap: 1rem;
+            color: var(--cl-navy);
+            font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans",
+                "Yu Gothic UI", "Yu Gothic", "Noto Sans JP", sans-serif;
+        }
+
+        .axis-order {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            flex: 0 0 auto;
+            min-width: 2.55rem;
+            min-height: 1.9rem;
+            padding: 0.2rem 0.6rem;
+            border-radius: 999px;
+            background: var(--cl-blue-soft);
+            color: var(--cl-blue);
+            font-size: 0.78rem;
+            font-weight: 750;
+            letter-spacing: 0.05em;
+        }
+
+        .axis-card-content {
+            min-width: 0;
+        }
+
+        .axis-card-content h4 {
+            margin: 0.15rem 0 0;
+            color: var(--cl-navy);
+            font-size: 1.05rem;
+            font-weight: 700;
+            line-height: 1.5;
+        }
+
+        .axis-card-content p {
+            margin: 0.55rem 0 0;
+            color: var(--cl-slate);
+            font-size: 0.9rem;
+            line-height: 1.7;
+        }
+
+        .axis-card-content .axis-no-description {
+            color: var(--cl-muted);
+        }
+
+        .axes-empty {
+            padding: 2rem;
+            background: var(--cl-surface);
+            border: 1px dashed var(--cl-border);
+            border-radius: 14px;
+            color: var(--cl-muted);
+            font-size: 0.9rem;
+            line-height: 1.7;
+            text-align: center;
+        }
+
+        [data-testid="stBaseButton-secondary"] {
+            min-height: 2.4rem;
+            border-color: var(--cl-border);
+            color: var(--cl-slate);
+            font-size: 0.84rem;
+            white-space: nowrap;
+        }
+
         @media (max-width: 760px) {
             .block-container {
                 padding-top: 2rem;
@@ -229,6 +379,14 @@ st.html(
             [data-testid="stForm"],
             .profile-summary {
                 padding: 1.5rem 1.25rem;
+            }
+
+            .axes-section-header {
+                margin-top: 3.75rem;
+            }
+
+            .axis-card-header {
+                gap: 0.75rem;
             }
         }
     </style>
@@ -249,6 +407,9 @@ try:
 except (OSError, sqlite3.Error):
     st.error("プロフィールを読み込めませんでした。時間をおいて再度お試しください。")
     st.stop()
+
+st.session_state.setdefault("editing_axis_id", None)
+st.session_state.setdefault("deleting_axis_id", None)
 
 with st.form("basic_profile_form"):
     st.html(
@@ -288,3 +449,236 @@ if save_profile:
         st.error("プロフィールを保存できませんでした。入力内容を確認して再度お試しください。")
 
 render_saved_profile(user_profile)
+
+st.html(
+    """
+    <section class="axes-section-header">
+        <div class="profile-section-label">Job-search Criteria</div>
+        <h2>就活軸</h2>
+        <p class="axes-section-copy">
+            企業選びで重視するポイントを整理します。<br>
+            就職活動の進行に合わせて、追加・編集・並び替えができます。
+        </p>
+        <p class="axes-order-note">
+            並び順は現在の優先順位を表すもので、絶対的なスコアではありません。
+        </p>
+    </section>
+    """
+)
+
+show_axis_feedback()
+
+with st.form("add_job_axis_form", clear_on_submit=True):
+    st.html(
+        """
+        <div class="profile-form-heading">
+            <div class="profile-section-label">Add Criterion</div>
+            <h2>新しい就活軸を追加</h2>
+        </div>
+        """
+    )
+    new_criterion = st.text_input(
+        "就活軸名",
+        placeholder="例：現場課題の解決",
+    )
+    new_description = st.text_area(
+        "説明（任意）",
+        height=110,
+        placeholder="例：DX・ITを通じて、実際の業務課題の改善に関わりたい。",
+    )
+    add_axis = st.form_submit_button("就活軸を追加", type="primary")
+
+if add_axis:
+    try:
+        create_job_axis(new_criterion, new_description)
+        set_axis_feedback("就活軸を追加しました。")
+        st.rerun()
+    except ValueError:
+        st.warning("就活軸名を入力してください。")
+    except (OSError, sqlite3.Error):
+        st.error("就活軸を追加できませんでした。時間をおいて再度お試しください。")
+
+try:
+    job_axes = list_job_axes()
+except (OSError, sqlite3.Error):
+    st.error("就活軸を読み込めませんでした。時間をおいて再度お試しください。")
+    job_axes = []
+
+st.html(
+    f"""
+    <div class="axes-list-heading">
+        <h3>登録済みの就活軸</h3>
+        <span class="axes-count">{len(job_axes)} 件</span>
+    </div>
+    """
+)
+
+if not job_axes:
+    st.html(
+        """
+        <div class="axes-empty">
+            就活軸はまだ登録されていません。<br>
+            企業選びで大切にしたいポイントから追加してみましょう。
+        </div>
+        """
+    )
+
+for axis_index, axis in enumerate(job_axes):
+    axis_id = int(axis["id"])
+    display_order = int(axis["display_order"])
+    criterion = str(axis["criterion"])
+    description = str(axis["description"])
+
+    if st.session_state["editing_axis_id"] == axis_id:
+        with st.form(f"edit_axis_{axis_id}"):
+            st.html(
+                f"""
+                <div class="profile-form-heading">
+                    <div class="profile-section-label">Edit Criterion {display_order:02d}</div>
+                    <h2>就活軸を編集</h2>
+                </div>
+                """
+            )
+            edited_criterion = st.text_input(
+                "就活軸名",
+                value=criterion,
+                key=f"edit_criterion_{axis_id}",
+            )
+            edited_description = st.text_area(
+                "説明（任意）",
+                value=description,
+                height=120,
+                key=f"edit_description_{axis_id}",
+            )
+            edit_columns = st.columns(2)
+            with edit_columns[0]:
+                save_axis_edit = st.form_submit_button(
+                    "変更を保存", type="primary", use_container_width=True
+                )
+            with edit_columns[1]:
+                cancel_axis_edit = st.form_submit_button(
+                    "キャンセル", use_container_width=True
+                )
+
+        if cancel_axis_edit:
+            st.session_state["editing_axis_id"] = None
+            st.rerun()
+
+        if save_axis_edit:
+            try:
+                update_job_axis(axis_id, edited_criterion, edited_description)
+                st.session_state["editing_axis_id"] = None
+                set_axis_feedback("就活軸を更新しました。")
+                st.rerun()
+            except ValueError:
+                st.warning("就活軸名を入力してください。")
+            except (OSError, sqlite3.Error):
+                st.error(
+                    "就活軸を更新できませんでした。時間をおいて再度お試しください。"
+                )
+        continue
+
+    escaped_criterion = html.escape(criterion)
+    escaped_description = (
+        html.escape(description).replace("\n", "<br>")
+        if description
+        else '<span class="axis-no-description">説明はありません。</span>'
+    )
+
+    with st.container(border=True):
+        st.html(
+            f"""
+            <div class="axis-card-header">
+                <span class="axis-order">{display_order:02d}</span>
+                <div class="axis-card-content">
+                    <h4>{escaped_criterion}</h4>
+                    <p>{escaped_description}</p>
+                </div>
+            </div>
+            """
+        )
+
+        if st.session_state["deleting_axis_id"] == axis_id:
+            st.warning(f"「{criterion}」を削除しますか？この操作は取り消せません。")
+            confirmation_columns = st.columns(2)
+            with confirmation_columns[0]:
+                confirm_delete = st.button(
+                    "削除する",
+                    key=f"confirm_delete_axis_{axis_id}",
+                    type="primary",
+                    use_container_width=True,
+                )
+            with confirmation_columns[1]:
+                cancel_delete = st.button(
+                    "キャンセル",
+                    key=f"cancel_delete_axis_{axis_id}",
+                    use_container_width=True,
+                )
+
+            if confirm_delete:
+                try:
+                    delete_job_axis(axis_id)
+                    st.session_state["deleting_axis_id"] = None
+                    set_axis_feedback("就活軸を削除しました。")
+                    st.rerun()
+                except (OSError, sqlite3.Error):
+                    st.error(
+                        "就活軸を削除できませんでした。時間をおいて再度お試しください。"
+                    )
+
+            if cancel_delete:
+                st.session_state["deleting_axis_id"] = None
+                st.rerun()
+        else:
+            action_columns = st.columns(4)
+            with action_columns[0]:
+                move_up = st.button(
+                    "↑ 上へ",
+                    key=f"move_axis_up_{axis_id}",
+                    disabled=axis_index == 0,
+                    use_container_width=True,
+                )
+            with action_columns[1]:
+                move_down = st.button(
+                    "↓ 下へ",
+                    key=f"move_axis_down_{axis_id}",
+                    disabled=axis_index == len(job_axes) - 1,
+                    use_container_width=True,
+                )
+            with action_columns[2]:
+                edit_axis = st.button(
+                    "編集",
+                    key=f"edit_axis_{axis_id}",
+                    use_container_width=True,
+                )
+            with action_columns[3]:
+                request_delete = st.button(
+                    "削除",
+                    key=f"delete_axis_{axis_id}",
+                    use_container_width=True,
+                )
+
+            if move_up or move_down:
+                try:
+                    moved = (
+                        move_job_axis_up(axis_id)
+                        if move_up
+                        else move_job_axis_down(axis_id)
+                    )
+                    if moved:
+                        set_axis_feedback("就活軸の並び順を更新しました。")
+                    st.rerun()
+                except (OSError, sqlite3.Error):
+                    st.error(
+                        "並び順を更新できませんでした。時間をおいて再度お試しください。"
+                    )
+
+            if edit_axis:
+                st.session_state["editing_axis_id"] = axis_id
+                st.session_state["deleting_axis_id"] = None
+                st.rerun()
+
+            if request_delete:
+                st.session_state["deleting_axis_id"] = axis_id
+                st.session_state["editing_axis_id"] = None
+                st.rerun()
