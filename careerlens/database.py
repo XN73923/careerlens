@@ -320,12 +320,17 @@ def _move_job_axis(
     connection = get_connection(database_path)
     try:
         connection.execute("BEGIN IMMEDIATE")
+        axis_exists = connection.execute(
+            "SELECT 1 FROM job_axes WHERE id = ?", (axis_id,)
+        ).fetchone()
+        if axis_exists is None:
+            connection.commit()
+            return False
+
         _normalize_job_axis_order(connection)
         current_axis = connection.execute(
             "SELECT display_order FROM job_axes WHERE id = ?", (axis_id,)
         ).fetchone()
-        if current_axis is None:
-            raise sqlite3.DatabaseError("The job-search criterion was not found.")
 
         current_order = current_axis[0]
         target_order = current_order + direction
@@ -379,3 +384,194 @@ def move_job_axis_down(
 ) -> bool:
     """Move a job axis one position later in the priority order."""
     return _move_job_axis(axis_id, 1, database_path)
+
+
+def _normalize_skills_tags(skills_tags: list[str]) -> list[str]:
+    """Return trimmed, non-empty skill tags without duplicates."""
+    normalized_tags = []
+    seen_tags = set()
+
+    for tag in skills_tags:
+        if not isinstance(tag, str):
+            continue
+
+        normalized_tag = tag.strip()
+        if normalized_tag and normalized_tag not in seen_tags:
+            normalized_tags.append(normalized_tag)
+            seen_tags.add(normalized_tag)
+
+    return normalized_tags
+
+
+def _deserialize_skills_tags(skills_tags_json: str) -> list[str]:
+    """Safely convert stored skills JSON into a normalized Python list."""
+    try:
+        skills_tags = json.loads(skills_tags_json)
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+    if not isinstance(skills_tags, list):
+        return []
+
+    return _normalize_skills_tags(skills_tags)
+
+
+def _validate_experience(
+    title: str,
+    category: str,
+    short_summary: str,
+    details: str,
+) -> tuple[str, str, str, str]:
+    """Trim experience fields and require title, category, and summary."""
+    normalized_title = title.strip()
+    normalized_category = category.strip()
+    normalized_summary = short_summary.strip()
+
+    if not normalized_title or not normalized_category or not normalized_summary:
+        raise ValueError("Title, category, and short summary are required.")
+
+    return (
+        normalized_title,
+        normalized_category,
+        normalized_summary,
+        details.strip(),
+    )
+
+
+def _experience_from_row(row: tuple[object, ...]) -> dict[str, object]:
+    """Convert a database row into an experience dictionary."""
+    return {
+        "id": row[0],
+        "title": row[1],
+        "category": row[2],
+        "short_summary": row[3],
+        "details": row[4],
+        "skills_tags": _deserialize_skills_tags(row[5]),
+        "created_at": row[6],
+        "updated_at": row[7],
+    }
+
+
+def list_experiences(
+    database_path: str | Path = DATABASE_PATH,
+) -> list[dict[str, object]]:
+    """Return all saved experiences, newest first."""
+    connection = get_connection(database_path)
+    try:
+        experiences = connection.execute(
+            """
+            SELECT id, title, category, short_summary, details, skills_tags,
+                   created_at, updated_at
+            FROM experiences
+            ORDER BY created_at DESC, id DESC
+            """
+        ).fetchall()
+    finally:
+        connection.close()
+
+    return [_experience_from_row(experience) for experience in experiences]
+
+
+def get_experience(
+    experience_id: int,
+    database_path: str | Path = DATABASE_PATH,
+) -> dict[str, object] | None:
+    """Return one experience, or None when it does not exist."""
+    connection = get_connection(database_path)
+    try:
+        experience = connection.execute(
+            """
+            SELECT id, title, category, short_summary, details, skills_tags,
+                   created_at, updated_at
+            FROM experiences
+            WHERE id = ?
+            """,
+            (experience_id,),
+        ).fetchone()
+    finally:
+        connection.close()
+
+    return _experience_from_row(experience) if experience is not None else None
+
+
+def create_experience(
+    title: str,
+    category: str,
+    short_summary: str,
+    details: str = "",
+    skills_tags: list[str] | None = None,
+    database_path: str | Path = DATABASE_PATH,
+) -> int:
+    """Create and return the ID of a user-owned experience record."""
+    normalized_fields = _validate_experience(
+        title, category, short_summary, details
+    )
+    normalized_tags = _normalize_skills_tags(skills_tags or [])
+    skills_tags_json = json.dumps(normalized_tags, ensure_ascii=False)
+
+    connection = get_connection(database_path)
+    try:
+        cursor = connection.execute(
+            """
+            INSERT INTO experiences (
+                title, category, short_summary, details, skills_tags
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (*normalized_fields, skills_tags_json),
+        )
+        connection.commit()
+        return cursor.lastrowid
+    finally:
+        connection.close()
+
+
+def update_experience(
+    experience_id: int,
+    title: str,
+    category: str,
+    short_summary: str,
+    details: str,
+    skills_tags: list[str],
+    database_path: str | Path = DATABASE_PATH,
+) -> None:
+    """Update a user-owned experience and its modification timestamp."""
+    normalized_fields = _validate_experience(
+        title, category, short_summary, details
+    )
+    normalized_tags = _normalize_skills_tags(skills_tags)
+    skills_tags_json = json.dumps(normalized_tags, ensure_ascii=False)
+
+    connection = get_connection(database_path)
+    try:
+        cursor = connection.execute(
+            """
+            UPDATE experiences
+            SET title = ?, category = ?, short_summary = ?, details = ?,
+                skills_tags = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (*normalized_fields, skills_tags_json, experience_id),
+        )
+        if cursor.rowcount != 1:
+            raise sqlite3.DatabaseError("The experience was not found.")
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def delete_experience(
+    experience_id: int,
+    database_path: str | Path = DATABASE_PATH,
+) -> None:
+    """Delete one user-owned experience record."""
+    connection = get_connection(database_path)
+    try:
+        cursor = connection.execute(
+            "DELETE FROM experiences WHERE id = ?", (experience_id,)
+        )
+        if cursor.rowcount != 1:
+            raise sqlite3.DatabaseError("The experience was not found.")
+        connection.commit()
+    finally:
+        connection.close()

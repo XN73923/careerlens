@@ -7,14 +7,19 @@ import unittest
 from pathlib import Path
 
 from careerlens.database import (
+    create_experience,
     create_job_axis,
+    delete_experience,
     delete_job_axis,
     get_connection,
+    get_experience,
     get_user_profile,
     initialize_database,
+    list_experiences,
     list_job_axes,
     move_job_axis_down,
     move_job_axis_up,
+    update_experience,
     update_job_axis,
     update_user_profile,
 )
@@ -228,6 +233,184 @@ class JobAxisDatabaseTests(unittest.TestCase):
         )
         self.assertEqual([axis["display_order"] for axis in axes], [1, 2, 3])
 
+    def test_moving_a_missing_axis_is_a_no_op(self) -> None:
+        first_id, second_id, third_id = self.create_three_axes()
+
+        moved_up = move_job_axis_up(9999, self.database_path)
+        moved_down = move_job_axis_down(9999, self.database_path)
+
+        self.assertFalse(moved_up)
+        self.assertFalse(moved_down)
+        axes = list_job_axes(self.database_path)
+        self.assertEqual(
+            [axis["id"] for axis in axes], [first_id, second_id, third_id]
+        )
+        self.assertEqual([axis["display_order"] for axis in axes], [1, 2, 3])
+
+
+class ExperienceDatabaseTests(unittest.TestCase):
+    """Verify experience CRUD, validation, and skills JSON behavior."""
+
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.database_path = Path(self.temporary_directory.name) / "careerlens.db"
+        initialize_database(self.database_path)
+
+    def tearDown(self) -> None:
+        self.temporary_directory.cleanup()
+
+    def test_create_and_get_experience_with_skills_tags(self) -> None:
+        experience_id = create_experience(
+            "  学生会広報部でのイベント運営  ",
+            "  学生会・課外活動  ",
+            "  8名のメンバーとイベント広報を担当。  ",
+            "  広報計画を作成し、来場者数の増加につなげた。  ",
+            [" 調整力 ", "広報", "チームワーク", "調整力", ""],
+            self.database_path,
+        )
+
+        experience = get_experience(experience_id, self.database_path)
+
+        self.assertIsNotNone(experience)
+        self.assertEqual(experience["title"], "学生会広報部でのイベント運営")
+        self.assertEqual(experience["category"], "学生会・課外活動")
+        self.assertEqual(
+            experience["short_summary"], "8名のメンバーとイベント広報を担当。"
+        )
+        self.assertEqual(
+            experience["details"], "広報計画を作成し、来場者数の増加につなげた。"
+        )
+        self.assertEqual(
+            experience["skills_tags"], ["調整力", "広報", "チームワーク"]
+        )
+
+        connection = get_connection(self.database_path)
+        try:
+            stored_json = connection.execute(
+                "SELECT skills_tags FROM experiences WHERE id = ?",
+                (experience_id,),
+            ).fetchone()[0]
+        finally:
+            connection.close()
+
+        self.assertEqual(json.loads(stored_json), ["調整力", "広報", "チームワーク"])
+
+    def test_list_multiple_experiences_uses_stable_newest_first_order(self) -> None:
+        first_id = create_experience(
+            "教育実習", "教育実習", "授業設計と実践を経験。", database_path=self.database_path
+        )
+        second_id = create_experience(
+            "インターン", "インターンシップ", "業務改善を提案。", database_path=self.database_path
+        )
+
+        experiences = list_experiences(self.database_path)
+
+        self.assertEqual(
+            [experience["id"] for experience in experiences], [second_id, first_id]
+        )
+
+    def test_update_experience_changes_content_and_timestamp(self) -> None:
+        experience_id = create_experience(
+            "変更前", "その他", "変更前の要約", database_path=self.database_path
+        )
+        connection = get_connection(self.database_path)
+        try:
+            connection.execute(
+                "UPDATE experiences SET updated_at = ? WHERE id = ?",
+                ("2000-01-01 00:00:00", experience_id),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        update_experience(
+            experience_id,
+            "  変更後  ",
+            "  研究・授業  ",
+            "  変更後の要約  ",
+            "  変更後の詳細  ",
+            ["分析力", "発表"],
+            self.database_path,
+        )
+
+        experience = get_experience(experience_id, self.database_path)
+        self.assertEqual(experience["title"], "変更後")
+        self.assertEqual(experience["category"], "研究・授業")
+        self.assertEqual(experience["short_summary"], "変更後の要約")
+        self.assertEqual(experience["details"], "変更後の詳細")
+        self.assertEqual(experience["skills_tags"], ["分析力", "発表"])
+        self.assertNotEqual(experience["updated_at"], "2000-01-01 00:00:00")
+
+    def test_delete_experience_removes_only_requested_record(self) -> None:
+        first_id = create_experience(
+            "経験1", "その他", "要約1", database_path=self.database_path
+        )
+        second_id = create_experience(
+            "経験2", "その他", "要約2", database_path=self.database_path
+        )
+
+        delete_experience(first_id, self.database_path)
+
+        self.assertIsNone(get_experience(first_id, self.database_path))
+        self.assertEqual(get_experience(second_id, self.database_path)["title"], "経験2")
+
+    def test_required_experience_fields_reject_blank_values(self) -> None:
+        invalid_values = [
+            ("   ", "その他", "要約"),
+            ("タイトル", "   ", "要約"),
+            ("タイトル", "その他", "   "),
+        ]
+
+        for title, category, summary in invalid_values:
+            with self.subTest(title=title, category=category, summary=summary):
+                with self.assertRaises(ValueError):
+                    create_experience(
+                        title,
+                        category,
+                        summary,
+                        database_path=self.database_path,
+                    )
+
+        self.assertEqual(list_experiences(self.database_path), [])
+
+    def test_empty_skills_tags_are_stored_and_returned_as_empty_list(self) -> None:
+        experience_id = create_experience(
+            "タグなし経験",
+            "その他",
+            "タグを設定しない経験。",
+            skills_tags=[],
+            database_path=self.database_path,
+        )
+
+        experience = get_experience(experience_id, self.database_path)
+        self.assertEqual(experience["skills_tags"], [])
+
+        connection = get_connection(self.database_path)
+        try:
+            stored_json = connection.execute(
+                "SELECT skills_tags FROM experiences WHERE id = ?",
+                (experience_id,),
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        self.assertEqual(stored_json, "[]")
+
+    def test_invalid_skills_json_is_safely_returned_as_empty_list(self) -> None:
+        experience_id = create_experience(
+            "JSON確認", "その他", "不正JSONを安全に扱う。", database_path=self.database_path
+        )
+        connection = get_connection(self.database_path)
+        try:
+            connection.execute(
+                "UPDATE experiences SET skills_tags = ? WHERE id = ?",
+                ("not valid json", experience_id),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        experience = get_experience(experience_id, self.database_path)
+        self.assertEqual(experience["skills_tags"], [])
 
 if __name__ == "__main__":
     unittest.main()

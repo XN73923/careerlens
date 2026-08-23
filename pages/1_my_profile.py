@@ -6,13 +6,17 @@ import sqlite3
 import streamlit as st
 
 from careerlens.database import (
+    create_experience,
     create_job_axis,
+    delete_experience,
     delete_job_axis,
     get_user_profile,
     initialize_database,
+    list_experiences,
     list_job_axes,
     move_job_axis_down,
     move_job_axis_up,
+    update_experience,
     update_job_axis,
     update_user_profile,
 )
@@ -87,6 +91,23 @@ def show_axis_feedback() -> None:
         st.success(feedback["message"])
     else:
         st.error(feedback["message"])
+
+
+def parse_skills_tags(skills_tags_text: str) -> list[str]:
+    """Convert comma-separated skills input into an ordered unique list."""
+    return parse_target_roles(skills_tags_text)
+
+
+def set_experience_feedback(message: str) -> None:
+    """Keep one experience feedback message across a Streamlit rerun."""
+    st.session_state["experience_feedback"] = message
+
+
+def show_experience_feedback() -> None:
+    """Display and clear a pending experience feedback message."""
+    feedback = st.session_state.pop("experience_feedback", None)
+    if feedback:
+        st.success(feedback)
 
 
 st.set_page_config(page_title="My Profile | CareerLens", page_icon="🔎", layout="wide")
@@ -361,6 +382,65 @@ st.html(
             text-align: center;
         }
 
+        .experience-card-header {
+            color: var(--cl-navy);
+            font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans",
+                "Yu Gothic UI", "Yu Gothic", "Noto Sans JP", sans-serif;
+        }
+
+        .experience-category {
+            display: inline-flex;
+            align-items: center;
+            min-height: 1.8rem;
+            padding: 0.2rem 0.65rem;
+            border: 1px solid #d7e2f1;
+            border-radius: 999px;
+            background: var(--cl-blue-soft);
+            color: var(--cl-blue);
+            font-size: 0.76rem;
+            font-weight: 700;
+        }
+
+        .experience-card-header h4 {
+            margin: 0.85rem 0 0;
+            color: var(--cl-navy);
+            font-size: 1.08rem;
+            font-weight: 700;
+            line-height: 1.5;
+        }
+
+        .experience-summary {
+            margin: 0.55rem 0 0;
+            color: var(--cl-slate);
+            font-size: 0.9rem;
+            line-height: 1.7;
+        }
+
+        .experience-tags {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.4rem;
+            margin-top: 0.9rem;
+        }
+
+        .experience-tag {
+            display: inline-flex;
+            align-items: center;
+            min-height: 1.7rem;
+            padding: 0.18rem 0.6rem;
+            border-radius: 999px;
+            background: #f0f3f7;
+            color: var(--cl-slate);
+            font-size: 0.76rem;
+            font-weight: 650;
+        }
+
+        .experience-no-tags {
+            margin-top: 0.8rem;
+            color: var(--cl-muted);
+            font-size: 0.78rem;
+        }
+
         [data-testid="stBaseButton-secondary"] {
             min-height: 2.4rem;
             border-color: var(--cl-border);
@@ -410,6 +490,8 @@ except (OSError, sqlite3.Error):
 
 st.session_state.setdefault("editing_axis_id", None)
 st.session_state.setdefault("deleting_axis_id", None)
+st.session_state.setdefault("editing_experience_id", None)
+st.session_state.setdefault("deleting_experience_id", None)
 
 with st.form("basic_profile_form"):
     st.html(
@@ -681,4 +763,269 @@ for axis_index, axis in enumerate(job_axes):
             if request_delete:
                 st.session_state["deleting_axis_id"] = axis_id
                 st.session_state["editing_axis_id"] = None
+                st.rerun()
+
+st.html(
+    """
+    <section class="axes-section-header">
+        <div class="profile-section-label">Experience Library</div>
+        <h2>経験・エピソード</h2>
+        <p class="axes-section-copy">
+            選考で活用できる経験やエピソードを整理します。<br>
+            学生生活、実習、インターン、ボランティアなど、複数の経験を保存できます。
+        </p>
+        <p class="axes-order-note">
+            ここに保存した内容を自動で評価・分析することはありません。
+        </p>
+    </section>
+    """
+)
+
+show_experience_feedback()
+
+with st.form("add_experience_form", clear_on_submit=True):
+    st.html(
+        """
+        <div class="profile-form-heading">
+            <div class="profile-section-label">Add Experience</div>
+            <h2>新しい経験を追加</h2>
+        </div>
+        """
+    )
+    new_experience_title = st.text_input(
+        "タイトル",
+        placeholder="例：学生会広報部でのイベント運営",
+    )
+    new_experience_category = st.text_input(
+        "カテゴリ",
+        placeholder="例：学生会・課外活動、教育実習、インターンシップ",
+    )
+    new_experience_summary = st.text_area(
+        "短い要約",
+        height=110,
+        placeholder="例：広報部副部長として8名のメンバーとイベント広報を担当。",
+    )
+    new_experience_details = st.text_area(
+        "詳細（任意）",
+        height=210,
+        placeholder=(
+            "背景、自分の役割、行動、結果、学んだことなどを自由に記録できます。"
+        ),
+    )
+    new_experience_skills = st.text_input(
+        "スキル・タグ（任意）",
+        placeholder="例：調整力, 広報, チームワーク, 計画力",
+        help="複数ある場合はカンマ区切りで入力してください。",
+    )
+    add_experience = st.form_submit_button("経験を追加", type="primary")
+
+if add_experience:
+    try:
+        create_experience(
+            new_experience_title,
+            new_experience_category,
+            new_experience_summary,
+            new_experience_details,
+            parse_skills_tags(new_experience_skills),
+        )
+        set_experience_feedback("経験・エピソードを追加しました。")
+        st.rerun()
+    except ValueError:
+        st.warning("タイトル、カテゴリ、短い要約を入力してください。")
+    except (OSError, sqlite3.Error):
+        st.error("経験を追加できませんでした。時間をおいて再度お試しください。")
+
+try:
+    experiences = list_experiences()
+except (OSError, sqlite3.Error):
+    st.error("経験を読み込めませんでした。時間をおいて再度お試しください。")
+    experiences = []
+
+st.html(
+    f"""
+    <div class="axes-list-heading">
+        <h3>保存済みの経験</h3>
+        <span class="axes-count">{len(experiences)} 件・新しい順</span>
+    </div>
+    """
+)
+
+if not experiences:
+    st.html(
+        """
+        <div class="axes-empty">
+            経験・エピソードはまだ登録されていません。<br>
+            選考で振り返りたい経験を一つずつ追加してみましょう。
+        </div>
+        """
+    )
+
+for experience in experiences:
+    experience_id = int(experience["id"])
+    experience_title = str(experience["title"])
+    experience_category = str(experience["category"])
+    experience_summary = str(experience["short_summary"])
+    experience_details = str(experience["details"])
+    experience_skills = list(experience["skills_tags"])
+
+    if st.session_state["editing_experience_id"] == experience_id:
+        with st.form(f"edit_experience_{experience_id}"):
+            st.html(
+                """
+                <div class="profile-form-heading">
+                    <div class="profile-section-label">Edit Experience</div>
+                    <h2>経験・エピソードを編集</h2>
+                </div>
+                """
+            )
+            edited_experience_title = st.text_input(
+                "タイトル",
+                value=experience_title,
+                key=f"edit_experience_title_{experience_id}",
+            )
+            edited_experience_category = st.text_input(
+                "カテゴリ",
+                value=experience_category,
+                key=f"edit_experience_category_{experience_id}",
+            )
+            edited_experience_summary = st.text_area(
+                "短い要約",
+                value=experience_summary,
+                height=110,
+                key=f"edit_experience_summary_{experience_id}",
+            )
+            edited_experience_details = st.text_area(
+                "詳細（任意）",
+                value=experience_details,
+                height=210,
+                key=f"edit_experience_details_{experience_id}",
+            )
+            edited_experience_skills = st.text_input(
+                "スキル・タグ（任意）",
+                value=", ".join(experience_skills),
+                key=f"edit_experience_skills_{experience_id}",
+            )
+            edit_experience_columns = st.columns(2)
+            with edit_experience_columns[0]:
+                save_experience_edit = st.form_submit_button(
+                    "変更を保存", type="primary", use_container_width=True
+                )
+            with edit_experience_columns[1]:
+                cancel_experience_edit = st.form_submit_button(
+                    "キャンセル", use_container_width=True
+                )
+
+        if cancel_experience_edit:
+            st.session_state["editing_experience_id"] = None
+            st.rerun()
+
+        if save_experience_edit:
+            try:
+                update_experience(
+                    experience_id,
+                    edited_experience_title,
+                    edited_experience_category,
+                    edited_experience_summary,
+                    edited_experience_details,
+                    parse_skills_tags(edited_experience_skills),
+                )
+                st.session_state["editing_experience_id"] = None
+                set_experience_feedback("経験・エピソードを更新しました。")
+                st.rerun()
+            except ValueError:
+                st.warning("タイトル、カテゴリ、短い要約を入力してください。")
+            except (OSError, sqlite3.Error):
+                st.error(
+                    "経験を更新できませんでした。時間をおいて再度お試しください。"
+                )
+        continue
+
+    escaped_experience_title = html.escape(experience_title)
+    escaped_experience_category = html.escape(experience_category)
+    escaped_experience_summary = html.escape(experience_summary).replace(
+        "\n", "<br>"
+    )
+    if experience_skills:
+        experience_tags_html = "".join(
+            f'<span class="experience-tag">{html.escape(tag)}</span>'
+            for tag in experience_skills
+        )
+        experience_tags_html = (
+            f'<div class="experience-tags">{experience_tags_html}</div>'
+        )
+    else:
+        experience_tags_html = '<div class="experience-no-tags">タグはありません。</div>'
+
+    with st.container(border=True):
+        st.html(
+            f"""
+            <div class="experience-card-header">
+                <span class="experience-category">{escaped_experience_category}</span>
+                <h4>{escaped_experience_title}</h4>
+                <p class="experience-summary">{escaped_experience_summary}</p>
+                {experience_tags_html}
+            </div>
+            """
+        )
+
+        if experience_details:
+            with st.expander("詳細を見る"):
+                st.write(experience_details)
+
+        if st.session_state["deleting_experience_id"] == experience_id:
+            st.warning(
+                f"「{experience_title}」を削除しますか？この操作は取り消せません。"
+            )
+            delete_experience_columns = st.columns(2)
+            with delete_experience_columns[0]:
+                confirm_experience_delete = st.button(
+                    "削除する",
+                    key=f"confirm_delete_experience_{experience_id}",
+                    type="primary",
+                    use_container_width=True,
+                )
+            with delete_experience_columns[1]:
+                cancel_experience_delete = st.button(
+                    "キャンセル",
+                    key=f"cancel_delete_experience_{experience_id}",
+                    use_container_width=True,
+                )
+
+            if confirm_experience_delete:
+                try:
+                    delete_experience(experience_id)
+                    st.session_state["deleting_experience_id"] = None
+                    set_experience_feedback("経験・エピソードを削除しました。")
+                    st.rerun()
+                except (OSError, sqlite3.Error):
+                    st.error(
+                        "経験を削除できませんでした。時間をおいて再度お試しください。"
+                    )
+
+            if cancel_experience_delete:
+                st.session_state["deleting_experience_id"] = None
+                st.rerun()
+        else:
+            experience_action_columns = st.columns(2)
+            with experience_action_columns[0]:
+                edit_experience = st.button(
+                    "編集",
+                    key=f"edit_experience_{experience_id}",
+                    use_container_width=True,
+                )
+            with experience_action_columns[1]:
+                request_experience_delete = st.button(
+                    "削除",
+                    key=f"delete_experience_{experience_id}",
+                    use_container_width=True,
+                )
+
+            if edit_experience:
+                st.session_state["editing_experience_id"] = experience_id
+                st.session_state["deleting_experience_id"] = None
+                st.rerun()
+
+            if request_experience_delete:
+                st.session_state["deleting_experience_id"] = experience_id
+                st.session_state["editing_experience_id"] = None
                 st.rerun()
