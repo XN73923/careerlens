@@ -575,3 +575,190 @@ def delete_experience(
         connection.commit()
     finally:
         connection.close()
+
+
+def _normalize_company_fields(
+    name: str,
+    main_business: str,
+    strengths: str,
+    strategy: str,
+    dx_ai_initiatives: str,
+    overseas_business: str,
+    roles_work: str,
+    free_notes: str,
+) -> tuple[str, str, str, str, str, str, str, str]:
+    """Trim company research fields and require a company name."""
+    normalized_name = name.strip()
+    if not normalized_name:
+        raise ValueError("A company name is required.")
+
+    return (
+        normalized_name,
+        main_business.strip(),
+        strengths.strip(),
+        strategy.strip(),
+        dx_ai_initiatives.strip(),
+        overseas_business.strip(),
+        roles_work.strip(),
+        free_notes.strip(),
+    )
+
+
+def _company_from_row(row: tuple[object, ...]) -> dict[str, object]:
+    """Convert a database row into a company dictionary."""
+    return {
+        "id": row[0],
+        "name": row[1],
+        "main_business": row[2],
+        "strengths": row[3],
+        "strategy": row[4],
+        "dx_ai_initiatives": row[5],
+        "overseas_business": row[6],
+        "roles_work": row[7],
+        "free_notes": row[8],
+        "created_at": row[9],
+        "updated_at": row[10],
+    }
+
+
+def list_companies(
+    database_path: str | Path = DATABASE_PATH,
+) -> list[dict[str, object]]:
+    """Return saved companies in a stable name and ID order."""
+    connection = get_connection(database_path)
+    try:
+        companies = connection.execute(
+            """
+            SELECT id, name, main_business, strengths, strategy,
+                   dx_ai_initiatives, overseas_business, roles_work, free_notes,
+                   created_at, updated_at
+            FROM companies
+            ORDER BY name COLLATE NOCASE, id
+            """
+        ).fetchall()
+    finally:
+        connection.close()
+
+    return [_company_from_row(company) for company in companies]
+
+
+def get_company(
+    company_id: int,
+    database_path: str | Path = DATABASE_PATH,
+) -> dict[str, object] | None:
+    """Return one company, or None when it does not exist."""
+    connection = get_connection(database_path)
+    try:
+        company = connection.execute(
+            """
+            SELECT id, name, main_business, strengths, strategy,
+                   dx_ai_initiatives, overseas_business, roles_work, free_notes,
+                   created_at, updated_at
+            FROM companies
+            WHERE id = ?
+            """,
+            (company_id,),
+        ).fetchone()
+    finally:
+        connection.close()
+
+    return _company_from_row(company) if company is not None else None
+
+
+def create_company(
+    name: str,
+    main_business: str = "",
+    strengths: str = "",
+    strategy: str = "",
+    dx_ai_initiatives: str = "",
+    overseas_business: str = "",
+    roles_work: str = "",
+    free_notes: str = "",
+    database_path: str | Path = DATABASE_PATH,
+) -> int:
+    """Create and return the ID of a user-entered company record."""
+    normalized_fields = _normalize_company_fields(
+        name,
+        main_business,
+        strengths,
+        strategy,
+        dx_ai_initiatives,
+        overseas_business,
+        roles_work,
+        free_notes,
+    )
+
+    connection = get_connection(database_path)
+    try:
+        cursor = connection.execute(
+            """
+            INSERT INTO companies (
+                name, main_business, strengths, strategy, dx_ai_initiatives,
+                overseas_business, roles_work, free_notes
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            normalized_fields,
+        )
+        connection.commit()
+        return cursor.lastrowid
+    finally:
+        connection.close()
+
+
+def update_company(
+    company_id: int,
+    name: str,
+    main_business: str,
+    strengths: str,
+    strategy: str,
+    dx_ai_initiatives: str,
+    overseas_business: str,
+    roles_work: str,
+    free_notes: str,
+    database_path: str | Path = DATABASE_PATH,
+) -> None:
+    """Update a company record while preserving its creation timestamp."""
+    normalized_fields = _normalize_company_fields(
+        name,
+        main_business,
+        strengths,
+        strategy,
+        dx_ai_initiatives,
+        overseas_business,
+        roles_work,
+        free_notes,
+    )
+
+    connection = get_connection(database_path)
+    try:
+        cursor = connection.execute(
+            """
+            UPDATE companies
+            SET name = ?, main_business = ?, strengths = ?, strategy = ?,
+                dx_ai_initiatives = ?, overseas_business = ?, roles_work = ?,
+                free_notes = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (*normalized_fields, company_id),
+        )
+        if cursor.rowcount != 1:
+            raise sqlite3.DatabaseError("The company was not found.")
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def delete_company(
+    company_id: int,
+    database_path: str | Path = DATABASE_PATH,
+) -> None:
+    """Delete one company and rely on existing foreign-key cascades."""
+    connection = get_connection(database_path)
+    try:
+        cursor = connection.execute("DELETE FROM companies WHERE id = ?", (company_id,))
+        if cursor.rowcount != 1:
+            raise sqlite3.DatabaseError("The company was not found.")
+        connection.commit()
+    finally:
+        connection.close()

@@ -7,18 +7,23 @@ import unittest
 from pathlib import Path
 
 from careerlens.database import (
+    create_company,
     create_experience,
     create_job_axis,
+    delete_company,
     delete_experience,
     delete_job_axis,
     get_connection,
+    get_company,
     get_experience,
     get_user_profile,
     initialize_database,
+    list_companies,
     list_experiences,
     list_job_axes,
     move_job_axis_down,
     move_job_axis_up,
+    update_company,
     update_experience,
     update_job_axis,
     update_user_profile,
@@ -411,6 +416,160 @@ class ExperienceDatabaseTests(unittest.TestCase):
 
         experience = get_experience(experience_id, self.database_path)
         self.assertEqual(experience["skills_tags"], [])
+
+
+class CompanyDatabaseTests(unittest.TestCase):
+    """Verify company research CRUD and input validation behavior."""
+
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.database_path = Path(self.temporary_directory.name) / "careerlens.db"
+        initialize_database(self.database_path)
+
+    def tearDown(self) -> None:
+        self.temporary_directory.cleanup()
+
+    def test_create_and_get_company_trims_all_fields(self) -> None:
+        company_id = create_company(
+            "  NEC  ",
+            "  ITサービス、社会インフラ  ",
+            "  幅広い顧客基盤  ",
+            "  DX事業を強化  ",
+            "  AI・生体認証  ",
+            "  グローバル展開  ",
+            "  SE、DX、ITコンサル  ",
+            "  面接で確認したい事項  ",
+            self.database_path,
+        )
+
+        company = get_company(company_id, self.database_path)
+
+        self.assertIsNotNone(company)
+        self.assertEqual(company["name"], "NEC")
+        self.assertEqual(company["main_business"], "ITサービス、社会インフラ")
+        self.assertEqual(company["strengths"], "幅広い顧客基盤")
+        self.assertEqual(company["strategy"], "DX事業を強化")
+        self.assertEqual(company["dx_ai_initiatives"], "AI・生体認証")
+        self.assertEqual(company["overseas_business"], "グローバル展開")
+        self.assertEqual(company["roles_work"], "SE、DX、ITコンサル")
+        self.assertEqual(company["free_notes"], "面接で確認したい事項")
+        self.assertIsNotNone(company["created_at"])
+        self.assertIsNotNone(company["updated_at"])
+
+    def test_list_multiple_companies_uses_stable_name_order(self) -> None:
+        zeta_id = create_company("Zeta", database_path=self.database_path)
+        alpha_first_id = create_company("alpha", database_path=self.database_path)
+        alpha_second_id = create_company("Alpha", database_path=self.database_path)
+
+        companies = list_companies(self.database_path)
+
+        self.assertEqual(
+            [company["id"] for company in companies],
+            [alpha_first_id, alpha_second_id, zeta_id],
+        )
+
+    def test_update_company_changes_fields_and_timestamp_but_not_created_at(self) -> None:
+        company_id = create_company(
+            "更新前",
+            "事業A",
+            "強みA",
+            "戦略A",
+            "DX A",
+            "海外A",
+            "職種A",
+            "メモA",
+            self.database_path,
+        )
+        original = get_company(company_id, self.database_path)
+        connection = get_connection(self.database_path)
+        try:
+            connection.execute(
+                "UPDATE companies SET updated_at = ? WHERE id = ?",
+                ("2000-01-01 00:00:00", company_id),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        update_company(
+            company_id,
+            "  更新後  ",
+            "  事業B  ",
+            "  強みB  ",
+            "  戦略B  ",
+            "  DX B  ",
+            "  海外B  ",
+            "  職種B  ",
+            "  メモB  ",
+            self.database_path,
+        )
+
+        updated = get_company(company_id, self.database_path)
+        self.assertEqual(updated["name"], "更新後")
+        self.assertEqual(updated["main_business"], "事業B")
+        self.assertEqual(updated["strengths"], "強みB")
+        self.assertEqual(updated["strategy"], "戦略B")
+        self.assertEqual(updated["dx_ai_initiatives"], "DX B")
+        self.assertEqual(updated["overseas_business"], "海外B")
+        self.assertEqual(updated["roles_work"], "職種B")
+        self.assertEqual(updated["free_notes"], "メモB")
+        self.assertEqual(updated["created_at"], original["created_at"])
+        self.assertNotEqual(updated["updated_at"], "2000-01-01 00:00:00")
+
+    def test_delete_company_removes_only_requested_record(self) -> None:
+        first_id = create_company("企業A", database_path=self.database_path)
+        second_id = create_company("企業B", database_path=self.database_path)
+
+        delete_company(first_id, self.database_path)
+
+        self.assertIsNone(get_company(first_id, self.database_path))
+        self.assertEqual(get_company(second_id, self.database_path)["name"], "企業B")
+
+    def test_company_name_is_required(self) -> None:
+        with self.assertRaises(ValueError):
+            create_company("   ", database_path=self.database_path)
+
+        company_id = create_company("有効な企業", database_path=self.database_path)
+        with self.assertRaises(ValueError):
+            update_company(
+                company_id,
+                "  ",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                "",
+                self.database_path,
+            )
+
+        self.assertEqual(get_company(company_id, self.database_path)["name"], "有効な企業")
+
+    def test_optional_fields_may_be_empty(self) -> None:
+        company_id = create_company("企業名", database_path=self.database_path)
+
+        company = get_company(company_id, self.database_path)
+
+        optional_fields = (
+            "main_business",
+            "strengths",
+            "strategy",
+            "dx_ai_initiatives",
+            "overseas_business",
+            "roles_work",
+            "free_notes",
+        )
+        self.assertTrue(all(company[field] == "" for field in optional_fields))
+
+    def test_duplicate_company_names_are_allowed(self) -> None:
+        first_id = create_company("同名企業", database_path=self.database_path)
+        second_id = create_company("同名企業", database_path=self.database_path)
+
+        companies = list_companies(self.database_path)
+
+        self.assertNotEqual(first_id, second_id)
+        self.assertEqual([company["name"] for company in companies], ["同名企業", "同名企業"])
 
 if __name__ == "__main__":
     unittest.main()
