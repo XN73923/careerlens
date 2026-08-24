@@ -3,16 +3,22 @@
 import html
 import sqlite3
 from collections import Counter
+from datetime import date
 
 import streamlit as st
 
 from careerlens.database import (
     create_company,
+    create_source,
     delete_company,
+    delete_source,
     get_company,
+    get_source,
     initialize_database,
     list_companies,
+    list_sources,
     update_company,
+    update_source,
 )
 
 
@@ -24,6 +30,15 @@ COMPANY_FIELDS = (
     ("overseas_business", "海外事業"),
     ("roles_work", "職種・仕事内容"),
     ("free_notes", "自由メモ"),
+)
+
+SOURCE_TYPES = (
+    "企業公式サイト",
+    "IR・統合報告書",
+    "採用サイト",
+    "プレスリリース",
+    "ニュース",
+    "その他",
 )
 
 
@@ -50,6 +65,16 @@ def show_company_feedback() -> None:
 def reset_company_mode() -> None:
     """Return to read mode when the selected company changes."""
     st.session_state["company_mode"] = "view"
+    st.session_state["source_mode"] = "view"
+    st.session_state.pop("active_source_id", None)
+
+
+def start_company_creation() -> None:
+    """Enter create mode with a fresh set of form widget keys."""
+    st.session_state["company_create_form_version"] += 1
+    st.session_state["company_mode"] = "create"
+    st.session_state["source_mode"] = "view"
+    st.session_state.pop("active_source_id", None)
 
 
 def normalized_company_name(name: str) -> str:
@@ -84,6 +109,11 @@ def render_company_form(
     heading = "企業情報を編集" if is_editing else "新しい企業を追加"
     label = "EDIT RESEARCH" if is_editing else "NEW RESEARCH"
     submit_label = "変更を保存" if is_editing else "企業を保存"
+    if is_editing:
+        form_namespace = f"company_edit_{company_id}"
+    else:
+        create_version = st.session_state["company_create_form_version"]
+        form_namespace = f"company_create_{create_version}"
 
     st.html(
         f"""
@@ -95,11 +125,12 @@ def render_company_form(
         """
     )
 
-    with st.form(f"company_form_{company_id or 'new'}"):
+    with st.form(f"{form_namespace}_form"):
         name = st.text_input(
             "企業名",
             value=str(company["name"]) if company else "",
             placeholder="例：NEC",
+            key=f"{form_namespace}_name",
         )
 
         if has_duplicate_name(name, companies, company_id):
@@ -113,42 +144,49 @@ def render_company_form(
                 value=str(company["main_business"]),
                 placeholder="例：ITサービス、社会インフラ、通信、AI・デジタル関連事業など。",
                 height=110,
+                key=f"{form_namespace}_main_business",
             )
             strengths = st.text_area(
                 "強み・特徴",
                 value=str(company["strengths"]),
                 placeholder="例：社会インフラ領域での実績、幅広い顧客基盤、AI・生体認証技術。",
                 height=110,
+                key=f"{form_namespace}_strengths",
             )
             strategy = st.text_area(
                 "経営戦略・注力領域",
                 value=str(company["strategy"]),
                 placeholder="例：DX事業の拡大や重点領域への投資方針。",
                 height=110,
+                key=f"{form_namespace}_strategy",
             )
             dx_ai_initiatives = st.text_area(
                 "DX・AIの取り組み",
                 value=str(company["dx_ai_initiatives"]),
                 placeholder="DX支援、AI活用、デジタルサービスなどを記録",
                 height=110,
+                key=f"{form_namespace}_dx_ai_initiatives",
             )
             overseas_business = st.text_area(
                 "海外事業",
                 value=str(company["overseas_business"]),
                 placeholder="海外での事業領域や展開地域などを記録",
                 height=110,
+                key=f"{form_namespace}_overseas_business",
             )
             roles_work = st.text_area(
                 "職種・仕事内容",
                 value=str(company["roles_work"]),
                 placeholder="関心のある職種、仕事内容、配属可能性などを記録",
                 height=110,
+                key=f"{form_namespace}_roles_work",
             )
             free_notes = st.text_area(
                 "自由メモ",
                 value=str(company["free_notes"]),
                 placeholder="印象、面接で確認したいこと、後で調べることなど",
                 height=180,
+                key=f"{form_namespace}_free_notes",
             )
         else:
             st.html(
@@ -162,16 +200,19 @@ def render_company_form(
                 "主な事業",
                 placeholder="例：ITサービス、社会インフラ、通信、AI・デジタル関連事業など。",
                 height=90,
+                key=f"{form_namespace}_main_business",
             )
             strengths = st.text_area(
                 "強み・特徴",
                 placeholder="例：社会インフラ領域での実績、幅広い顧客基盤、AI・生体認証技術。",
                 height=90,
+                key=f"{form_namespace}_strengths",
             )
             strategy = st.text_area(
                 "経営戦略・注力領域",
                 placeholder="例：DX事業の拡大や重点領域への投資方針。",
                 height=90,
+                key=f"{form_namespace}_strategy",
             )
 
             with st.expander("DX・グローバル"):
@@ -179,11 +220,13 @@ def render_company_form(
                     "DX・AIの取り組み",
                     placeholder="DX支援、AI活用、デジタルサービスなどを記録",
                     height=90,
+                    key=f"{form_namespace}_dx_ai_initiatives",
                 )
                 overseas_business = st.text_area(
                     "海外事業",
                     placeholder="海外での事業領域や展開地域などを記録",
                     height=90,
+                    key=f"{form_namespace}_overseas_business",
                 )
 
             with st.expander("選考準備メモ"):
@@ -191,11 +234,13 @@ def render_company_form(
                     "職種・仕事内容",
                     placeholder="関心のある職種、仕事内容、配属可能性などを記録",
                     height=90,
+                    key=f"{form_namespace}_roles_work",
                 )
                 free_notes = st.text_area(
                     "自由メモ",
                     placeholder="印象、面接で確認したいこと、後で調べることなど",
                     height=120,
+                    key=f"{form_namespace}_free_notes",
                 )
 
         save_column, cancel_column, _ = st.columns([1.25, 1, 3])
@@ -254,6 +299,8 @@ def render_company_form(
 
     st.session_state["company_pending_selection"] = selected_id
     st.session_state["company_mode"] = "view"
+    st.session_state["source_mode"] = "view"
+    st.session_state.pop("active_source_id", None)
     set_company_feedback(message)
     st.rerun()
 
@@ -344,8 +391,352 @@ def render_delete_confirmation(company: dict[str, object]) -> None:
 
         st.session_state["company_pending_selection"] = None
         st.session_state["company_mode"] = "view"
+        st.session_state["source_mode"] = "view"
+        st.session_state.pop("active_source_id", None)
         set_company_feedback("企業を削除しました。")
         st.rerun()
+
+
+def set_source_feedback(message: str) -> None:
+    """Keep one source feedback message across a Streamlit rerun."""
+    st.session_state["source_feedback"] = message
+
+
+def show_source_feedback() -> None:
+    """Display and clear a pending source feedback message."""
+    feedback = st.session_state.pop("source_feedback", None)
+    if feedback:
+        st.success(feedback)
+
+
+def source_validation_message(error: ValueError) -> str:
+    """Convert database validation errors into concise Japanese feedback."""
+    error_message = str(error)
+    if "title" in error_message:
+        return "タイトルを入力してください。"
+    if "URL" in error_message:
+        return "http:// または https:// で始まる有効なURLを入力してください。"
+    if "type" in error_message:
+        return "情報源タイプを選択してください。"
+    if "date" in error_message:
+        return "公開日を正しく入力してください。"
+    return "入力内容を確認してください。"
+
+
+def render_source_form(
+    company_id: int,
+    source: dict[str, object] | None = None,
+) -> None:
+    """Render a single explicit create/edit form for a company source."""
+    is_editing = source is not None
+    source_id = int(source["id"]) if source else None
+    heading = "情報源を編集" if is_editing else "情報源を追加"
+    submit_label = "変更を保存" if is_editing else "情報源を保存"
+
+    publication_date_value = None
+    if source and source["publication_date"]:
+        try:
+            publication_date_value = date.fromisoformat(
+                str(source["publication_date"])
+            )
+        except ValueError:
+            publication_date_value = None
+
+    available_source_types = list(SOURCE_TYPES)
+    current_source_type = str(source["source_type"]) if source else SOURCE_TYPES[0]
+    if current_source_type not in available_source_types:
+        available_source_types.insert(0, current_source_type)
+
+    st.html(
+        f"""
+        <div class="source-form-heading">
+            <div class="research-section-label">
+                {'EDIT SOURCE' if is_editing else 'NEW SOURCE'}
+            </div>
+            <h3>{heading}</h3>
+            <p>根拠として後から確認できるURLと、用途のメモを保存します。</p>
+        </div>
+        """
+    )
+
+    with st.form(f"source_form_{source_id or 'new'}"):
+        title = st.text_input(
+            "タイトル",
+            value=str(source["title"]) if source else "",
+            placeholder="例：NEC 2026統合報告書",
+        )
+        url = st.text_input(
+            "URL",
+            value=str(source["url"]) if source else "",
+            placeholder="https://...",
+        )
+        source_type = st.selectbox(
+            "情報源タイプ",
+            options=available_source_types,
+            index=available_source_types.index(current_source_type),
+        )
+        publication_date = st.date_input(
+            "公開日（任意）",
+            value=publication_date_value,
+            format="YYYY/MM/DD",
+        )
+        notes = st.text_area(
+            "メモ（任意）",
+            value=str(source["notes"]) if source else "",
+            placeholder="例：DX戦略の確認に利用",
+            height=90,
+        )
+
+        save_column, cancel_column, _ = st.columns([1.25, 1, 3])
+        with save_column:
+            save_submitted = st.form_submit_button(
+                submit_label,
+                type="primary",
+                use_container_width=True,
+            )
+        with cancel_column:
+            cancel_submitted = st.form_submit_button(
+                "キャンセル",
+                use_container_width=True,
+            )
+
+    if cancel_submitted:
+        st.session_state["source_mode"] = "view"
+        st.session_state.pop("active_source_id", None)
+        st.rerun()
+
+    if not save_submitted:
+        return
+
+    publication_date_text = (
+        publication_date.isoformat() if publication_date is not None else None
+    )
+    try:
+        if is_editing:
+            update_source(
+                source_id,
+                company_id,
+                title,
+                url,
+                source_type,
+                publication_date_text,
+                notes,
+            )
+            message = "情報源を更新しました。"
+        else:
+            create_source(
+                company_id,
+                title,
+                url,
+                source_type,
+                publication_date_text,
+                notes,
+            )
+            message = "情報源を追加しました。"
+    except ValueError as error:
+        st.warning(source_validation_message(error))
+        return
+    except sqlite3.IntegrityError:
+        st.error("選択した企業が見つかりません。企業を選び直してください。")
+        return
+    except sqlite3.Error:
+        st.error("情報源を保存できませんでした。時間をおいて再度お試しください。")
+        return
+
+    st.session_state["source_mode"] = "view"
+    st.session_state.pop("active_source_id", None)
+    set_source_feedback(message)
+    st.rerun()
+
+
+def render_source_card(source: dict[str, object]) -> None:
+    """Render a compact evidence-reference card and its explicit actions."""
+    safe_type = html.escape(str(source["source_type"]))
+    safe_title = html.escape(str(source["title"]))
+    safe_url = html.escape(str(source["url"]))
+    publication_date = source["publication_date"]
+    notes = str(source["notes"]).strip()
+
+    date_html = (
+        f'<span class="source-date">公開日 {html.escape(str(publication_date))}</span>'
+        if publication_date
+        else ""
+    )
+    notes_html = (
+        f'<p class="source-notes">{html.escape(notes).replace(chr(10), "<br>")}</p>'
+        if notes
+        else ""
+    )
+
+    with st.container(border=True):
+        st.html(
+            f"""
+            <article class="source-card-content">
+                <div class="source-meta">
+                    <span class="source-type">{safe_type}</span>
+                    {date_html}
+                </div>
+                <h3>{safe_title}</h3>
+                <div class="source-url">{safe_url}</div>
+                {notes_html}
+            </article>
+            """
+        )
+
+        source_id = int(source["id"])
+        link_column, edit_column, delete_column = st.columns([1.8, 1, 1])
+        with link_column:
+            st.link_button(
+                "元のURLを開く",
+                str(source["url"]),
+                use_container_width=True,
+            )
+        with edit_column:
+            if st.button(
+                "編集",
+                use_container_width=True,
+                key=f"edit_source_{source_id}",
+            ):
+                st.session_state["active_source_id"] = source_id
+                st.session_state["source_mode"] = "edit"
+                st.rerun()
+        with delete_column:
+            if st.button(
+                "削除",
+                use_container_width=True,
+                key=f"delete_source_{source_id}",
+            ):
+                st.session_state["active_source_id"] = source_id
+                st.session_state["source_mode"] = "delete"
+                st.rerun()
+
+
+def render_source_delete_confirmation(
+    company_id: int,
+    source: dict[str, object],
+) -> None:
+    """Require a second explicit action before deleting a source."""
+    safe_title = html.escape(str(source["title"]))
+    st.html(
+        f"""
+        <section class="source-delete-confirmation">
+            <div class="research-section-label">DELETE SOURCE</div>
+            <h3>「{safe_title}」を削除しますか？</h3>
+            <p>保存した情報源の参照は元に戻せません。</p>
+        </section>
+        """
+    )
+
+    confirm_column, cancel_column, _ = st.columns([1.35, 1, 3])
+    source_id = int(source["id"])
+    with confirm_column:
+        confirm_delete = st.button(
+            "削除を確定",
+            type="primary",
+            use_container_width=True,
+            key=f"confirm_delete_source_{source_id}",
+        )
+    with cancel_column:
+        cancel_delete = st.button(
+            "キャンセル",
+            use_container_width=True,
+            key=f"cancel_delete_source_{source_id}",
+        )
+
+    if cancel_delete:
+        st.session_state["source_mode"] = "view"
+        st.session_state.pop("active_source_id", None)
+        st.rerun()
+
+    if confirm_delete:
+        try:
+            delete_source(source_id, company_id)
+        except sqlite3.Error:
+            st.error("情報源を削除できませんでした。時間をおいて再度お試しください。")
+            return
+
+        st.session_state["source_mode"] = "view"
+        st.session_state.pop("active_source_id", None)
+        set_source_feedback("情報源を削除しました。")
+        st.rerun()
+
+
+def render_sources_section(company_id: int) -> None:
+    """Render source management for the currently selected company only."""
+    try:
+        sources = list_sources(company_id)
+    except sqlite3.Error:
+        st.error("情報源を読み込めませんでした。時間をおいて再度お試しください。")
+        return
+
+    st.html(
+        f"""
+        <section class="sources-section-header">
+            <div class="research-section-label">SOURCE-AWARE RESEARCH</div>
+            <div class="sources-heading-row">
+                <div>
+                    <h2>情報源</h2>
+                    <p>
+                        企業研究の根拠となる公式サイト、IR資料、採用情報、
+                        ニュースなどを保存します。
+                    </p>
+                </div>
+                <span class="sources-count">{len(sources)}件</span>
+            </div>
+        </section>
+        """
+    )
+    show_source_feedback()
+
+    source_mode = st.session_state.get("source_mode", "view")
+    if source_mode == "view":
+        if st.button(
+            "情報源を追加",
+            type="primary",
+            key="add_source",
+        ):
+            st.session_state["source_mode"] = "create"
+            st.session_state.pop("active_source_id", None)
+            st.rerun()
+
+        if not sources:
+            st.html(
+                """
+                <div class="sources-empty-state">
+                    情報源はまだありません。確認した公式サイトや資料のURLを保存できます。
+                </div>
+                """
+            )
+            return
+
+        for source in sources:
+            render_source_card(source)
+        return
+
+    if source_mode == "create":
+        render_source_form(company_id)
+        return
+
+    active_source_id = st.session_state.get("active_source_id")
+    if active_source_id is None:
+        st.session_state["source_mode"] = "view"
+        st.warning("対象の情報源を選び直してください。")
+        return
+
+    try:
+        active_source = get_source(int(active_source_id), company_id)
+    except sqlite3.Error:
+        active_source = None
+        st.error("情報源を読み込めませんでした。時間をおいて再度お試しください。")
+
+    if active_source is None:
+        st.session_state["source_mode"] = "view"
+        st.session_state.pop("active_source_id", None)
+        st.warning("この企業に属する情報源が見つかりません。")
+    elif source_mode == "edit":
+        render_source_form(company_id, active_source)
+    elif source_mode == "delete":
+        render_source_delete_confirmation(company_id, active_source)
 
 
 st.set_page_config(
@@ -391,7 +782,12 @@ st.html(
         .research-form-heading,
         .research-card,
         .delete-confirmation,
-        .research-empty-state {
+        .research-empty-state,
+        .sources-section-header,
+        .source-form-heading,
+        .source-card-content,
+        .source-delete-confirmation,
+        .sources-empty-state {
             font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans",
                 "Yu Gothic UI", "Yu Gothic", "Noto Sans JP", sans-serif;
         }
@@ -618,6 +1014,139 @@ st.html(
             border-radius: 14px;
         }
 
+        .sources-section-header {
+            margin: 4rem 0 1.25rem;
+            padding-top: 2.8rem;
+            border-top: 1px solid var(--cl-border);
+        }
+
+        .sources-heading-row {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 1.5rem;
+            margin-top: 0.45rem;
+        }
+
+        .sources-heading-row h2 {
+            margin: 0;
+            color: var(--cl-navy);
+            font-size: clamp(1.65rem, 3vw, 2.15rem);
+            font-weight: 750;
+            letter-spacing: -0.03em;
+        }
+
+        .sources-heading-row p {
+            max-width: 620px;
+            margin: 0.65rem 0 0;
+            color: var(--cl-slate);
+            font-size: 0.9rem;
+            line-height: 1.7;
+        }
+
+        .sources-count {
+            flex: 0 0 auto;
+            margin-top: 0.2rem;
+            padding: 0.28rem 0.7rem;
+            background: var(--cl-blue-soft);
+            border: 1px solid #d7e2f1;
+            border-radius: 999px;
+            color: var(--cl-blue);
+            font-size: 0.78rem;
+            font-weight: 700;
+        }
+
+        .source-form-heading {
+            margin: 1.4rem 0 1rem;
+        }
+
+        .source-form-heading h3,
+        .source-delete-confirmation h3 {
+            margin: 0.4rem 0 0;
+            color: var(--cl-navy);
+            font-size: 1.35rem;
+            font-weight: 720;
+            letter-spacing: -0.02em;
+        }
+
+        .source-form-heading p,
+        .source-delete-confirmation p {
+            margin: 0.55rem 0 0;
+            color: var(--cl-slate);
+            font-size: 0.86rem;
+            line-height: 1.65;
+        }
+
+        .source-card-content {
+            padding: 0.2rem 0.15rem 0.45rem;
+        }
+
+        .source-meta {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 0.6rem;
+        }
+
+        .source-type {
+            display: inline-flex;
+            padding: 0.25rem 0.65rem;
+            background: var(--cl-blue-soft);
+            border-radius: 999px;
+            color: var(--cl-blue);
+            font-size: 0.75rem;
+            font-weight: 700;
+        }
+
+        .source-date {
+            color: var(--cl-muted);
+            font-size: 0.76rem;
+        }
+
+        .source-card-content h3 {
+            margin: 0.8rem 0 0;
+            color: var(--cl-navy);
+            font-size: 1.08rem;
+            font-weight: 700;
+            line-height: 1.5;
+        }
+
+        .source-url {
+            margin-top: 0.45rem;
+            color: var(--cl-blue);
+            font-size: 0.78rem;
+            line-height: 1.5;
+            overflow-wrap: anywhere;
+        }
+
+        .source-notes {
+            margin: 0.8rem 0 0;
+            padding-top: 0.8rem;
+            border-top: 1px solid var(--cl-border);
+            color: var(--cl-slate);
+            font-size: 0.86rem;
+            line-height: 1.65;
+        }
+
+        .sources-empty-state {
+            margin-top: 1rem;
+            padding: 1.5rem;
+            background: var(--cl-surface);
+            border: 1px dashed #cfd8e5;
+            border-radius: 12px;
+            color: var(--cl-muted);
+            font-size: 0.86rem;
+            line-height: 1.65;
+        }
+
+        .source-delete-confirmation {
+            margin-top: 1rem;
+            padding: 1.7rem 1.9rem;
+            background: var(--cl-surface);
+            border: 1px solid var(--cl-border);
+            border-radius: 12px;
+        }
+
         @media (max-width: 760px) {
             .block-container {
                 padding-top: 2.4rem;
@@ -635,8 +1164,18 @@ st.html(
 
             [data-testid="stForm"],
             .research-card,
-            .delete-confirmation {
+            .delete-confirmation,
+            .source-delete-confirmation {
                 padding: 1.5rem;
+            }
+
+            .sources-heading-row {
+                display: block;
+            }
+
+            .sources-count {
+                display: inline-flex;
+                margin-top: 0.8rem;
             }
         }
     </style>
@@ -645,6 +1184,8 @@ st.html(
 
 initialize_database()
 st.session_state.setdefault("company_mode", "view")
+st.session_state.setdefault("source_mode", "view")
+st.session_state.setdefault("company_create_form_version", 0)
 
 st.html(
     """
@@ -707,14 +1248,13 @@ with list_column:
             </div>
             """
         )
-        if st.button(
+        st.button(
             "新しい企業を追加",
             type="primary",
             use_container_width=True,
             key="add_company",
-        ):
-            st.session_state["company_mode"] = "create"
-            st.rerun()
+            on_click=start_company_creation,
+        )
 
         selected_company_id = st.selectbox(
             "企業を選択",
@@ -779,3 +1319,5 @@ with main_column:
                 ):
                     st.session_state["company_mode"] = "delete"
                     st.rerun()
+
+            render_sources_section(int(selected_company_id))

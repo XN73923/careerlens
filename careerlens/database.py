@@ -2,7 +2,9 @@
 
 import json
 import sqlite3
+from datetime import date
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -759,6 +761,191 @@ def delete_company(
         cursor = connection.execute("DELETE FROM companies WHERE id = ?", (company_id,))
         if cursor.rowcount != 1:
             raise sqlite3.DatabaseError("The company was not found.")
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _normalize_source_fields(
+    title: str,
+    url: str,
+    source_type: str,
+    publication_date: str | None,
+    notes: str,
+) -> tuple[str, str, str, str | None, str]:
+    """Validate and normalize one source reference without fetching its URL."""
+    normalized_title = title.strip()
+    if not normalized_title:
+        raise ValueError("A source title is required.")
+
+    normalized_url = url.strip()
+    parsed_url = urlsplit(normalized_url)
+    if (
+        parsed_url.scheme.lower() not in {"http", "https"}
+        or not parsed_url.netloc
+        or parsed_url.hostname is None
+        or any(character.isspace() for character in normalized_url)
+    ):
+        raise ValueError("A valid HTTP or HTTPS URL is required.")
+
+    normalized_source_type = source_type.strip()
+    if not normalized_source_type:
+        raise ValueError("A source type is required.")
+
+    normalized_publication_date = None
+    if publication_date is not None and publication_date.strip():
+        normalized_publication_date = publication_date.strip()
+        try:
+            date.fromisoformat(normalized_publication_date)
+        except ValueError as error:
+            raise ValueError("The publication date must use YYYY-MM-DD.") from error
+
+    return (
+        normalized_title,
+        normalized_url,
+        normalized_source_type,
+        normalized_publication_date,
+        notes.strip(),
+    )
+
+
+def _source_from_row(row: tuple[object, ...]) -> dict[str, object]:
+    """Convert a database row into a source dictionary."""
+    return {
+        "id": row[0],
+        "company_id": row[1],
+        "title": row[2],
+        "url": row[3],
+        "source_type": row[4],
+        "publication_date": row[5],
+        "notes": row[6],
+        "created_at": row[7],
+    }
+
+
+def list_sources(
+    company_id: int,
+    database_path: str | Path = DATABASE_PATH,
+) -> list[dict[str, object]]:
+    """Return only the source references owned by one company."""
+    connection = get_connection(database_path)
+    try:
+        sources = connection.execute(
+            """
+            SELECT id, company_id, title, url, source_type,
+                   publication_date, notes, created_at
+            FROM sources
+            WHERE company_id = ?
+            ORDER BY id DESC
+            """,
+            (company_id,),
+        ).fetchall()
+    finally:
+        connection.close()
+
+    return [_source_from_row(source) for source in sources]
+
+
+def get_source(
+    source_id: int,
+    company_id: int,
+    database_path: str | Path = DATABASE_PATH,
+) -> dict[str, object] | None:
+    """Return a source only when it belongs to the requested company."""
+    connection = get_connection(database_path)
+    try:
+        source = connection.execute(
+            """
+            SELECT id, company_id, title, url, source_type,
+                   publication_date, notes, created_at
+            FROM sources
+            WHERE id = ? AND company_id = ?
+            """,
+            (source_id, company_id),
+        ).fetchone()
+    finally:
+        connection.close()
+
+    return _source_from_row(source) if source is not None else None
+
+
+def create_source(
+    company_id: int,
+    title: str,
+    url: str,
+    source_type: str,
+    publication_date: str | None = None,
+    notes: str = "",
+    database_path: str | Path = DATABASE_PATH,
+) -> int:
+    """Create a source reference for one existing company and return its ID."""
+    normalized_fields = _normalize_source_fields(
+        title, url, source_type, publication_date, notes
+    )
+
+    connection = get_connection(database_path)
+    try:
+        cursor = connection.execute(
+            """
+            INSERT INTO sources (
+                company_id, title, url, source_type, publication_date, notes
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (company_id, *normalized_fields),
+        )
+        connection.commit()
+        return cursor.lastrowid
+    finally:
+        connection.close()
+
+
+def update_source(
+    source_id: int,
+    company_id: int,
+    title: str,
+    url: str,
+    source_type: str,
+    publication_date: str | None = None,
+    notes: str = "",
+    database_path: str | Path = DATABASE_PATH,
+) -> None:
+    """Update a source without allowing its company ownership to change."""
+    normalized_fields = _normalize_source_fields(
+        title, url, source_type, publication_date, notes
+    )
+
+    connection = get_connection(database_path)
+    try:
+        cursor = connection.execute(
+            """
+            UPDATE sources
+            SET title = ?, url = ?, source_type = ?, publication_date = ?, notes = ?
+            WHERE id = ? AND company_id = ?
+            """,
+            (*normalized_fields, source_id, company_id),
+        )
+        if cursor.rowcount != 1:
+            raise sqlite3.DatabaseError("The source was not found for this company.")
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def delete_source(
+    source_id: int,
+    company_id: int,
+    database_path: str | Path = DATABASE_PATH,
+) -> None:
+    """Delete a source only when it belongs to the requested company."""
+    connection = get_connection(database_path)
+    try:
+        cursor = connection.execute(
+            "DELETE FROM sources WHERE id = ? AND company_id = ?",
+            (source_id, company_id),
+        )
+        if cursor.rowcount != 1:
+            raise sqlite3.DatabaseError("The source was not found for this company.")
         connection.commit()
     finally:
         connection.close()

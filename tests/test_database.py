@@ -10,22 +10,27 @@ from careerlens.database import (
     create_company,
     create_experience,
     create_job_axis,
+    create_source,
     delete_company,
     delete_experience,
     delete_job_axis,
+    delete_source,
     get_connection,
     get_company,
     get_experience,
+    get_source,
     get_user_profile,
     initialize_database,
     list_companies,
     list_experiences,
     list_job_axes,
+    list_sources,
     move_job_axis_down,
     move_job_axis_up,
     update_company,
     update_experience,
     update_job_axis,
+    update_source,
     update_user_profile,
 )
 
@@ -570,6 +575,228 @@ class CompanyDatabaseTests(unittest.TestCase):
 
         self.assertNotEqual(first_id, second_id)
         self.assertEqual([company["name"] for company in companies], ["同名企業", "同名企業"])
+
+
+class SourceDatabaseTests(unittest.TestCase):
+    """Verify source CRUD, validation, ownership, and cascade behavior."""
+
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.database_path = Path(self.temporary_directory.name) / "careerlens.db"
+        initialize_database(self.database_path)
+        self.company_id = create_company(
+            "NEC", database_path=self.database_path
+        )
+
+    def tearDown(self) -> None:
+        self.temporary_directory.cleanup()
+
+    def test_create_and_get_source_trims_fields(self) -> None:
+        source_id = create_source(
+            self.company_id,
+            "  NEC 2026統合報告書  ",
+            "  https://example.com/integrated-report  ",
+            "  IR・統合報告書  ",
+            "2026-06-30",
+            "  DX戦略の確認に利用  ",
+            self.database_path,
+        )
+
+        source = get_source(source_id, self.company_id, self.database_path)
+
+        self.assertIsNotNone(source)
+        self.assertEqual(source["company_id"], self.company_id)
+        self.assertEqual(source["title"], "NEC 2026統合報告書")
+        self.assertEqual(source["url"], "https://example.com/integrated-report")
+        self.assertEqual(source["source_type"], "IR・統合報告書")
+        self.assertEqual(source["publication_date"], "2026-06-30")
+        self.assertEqual(source["notes"], "DX戦略の確認に利用")
+        self.assertIsNotNone(source["created_at"])
+
+    def test_list_multiple_sources_uses_stable_newest_first_order(self) -> None:
+        first_id = create_source(
+            self.company_id,
+            "企業公式サイト",
+            "https://example.com/company",
+            "企業公式サイト",
+            database_path=self.database_path,
+        )
+        second_id = create_source(
+            self.company_id,
+            "採用サイト",
+            "https://example.com/careers",
+            "採用サイト",
+            database_path=self.database_path,
+        )
+
+        sources = list_sources(self.company_id, self.database_path)
+
+        self.assertEqual([source["id"] for source in sources], [second_id, first_id])
+
+    def test_sources_are_isolated_between_companies(self) -> None:
+        other_company_id = create_company(
+            "富士通", database_path=self.database_path
+        )
+        first_source_id = create_source(
+            self.company_id,
+            "NEC公式",
+            "https://example.com/nec",
+            "企業公式サイト",
+            database_path=self.database_path,
+        )
+        second_source_id = create_source(
+            other_company_id,
+            "富士通公式",
+            "https://example.com/fujitsu",
+            "企業公式サイト",
+            database_path=self.database_path,
+        )
+
+        first_sources = list_sources(self.company_id, self.database_path)
+        second_sources = list_sources(other_company_id, self.database_path)
+
+        self.assertEqual([source["id"] for source in first_sources], [first_source_id])
+        self.assertEqual([source["id"] for source in second_sources], [second_source_id])
+        self.assertIsNone(
+            get_source(first_source_id, other_company_id, self.database_path)
+        )
+
+    def test_update_source_changes_fields_but_not_company_ownership(self) -> None:
+        source_id = create_source(
+            self.company_id,
+            "更新前",
+            "https://example.com/before",
+            "その他",
+            database_path=self.database_path,
+        )
+
+        update_source(
+            source_id,
+            self.company_id,
+            "  更新後  ",
+            "  https://example.com/after  ",
+            "  プレスリリース  ",
+            "2026-08-01",
+            "  更新後のメモ  ",
+            self.database_path,
+        )
+
+        source = get_source(source_id, self.company_id, self.database_path)
+        self.assertEqual(source["company_id"], self.company_id)
+        self.assertEqual(source["title"], "更新後")
+        self.assertEqual(source["url"], "https://example.com/after")
+        self.assertEqual(source["source_type"], "プレスリリース")
+        self.assertEqual(source["publication_date"], "2026-08-01")
+        self.assertEqual(source["notes"], "更新後のメモ")
+
+    def test_update_and_delete_reject_another_company_owner(self) -> None:
+        other_company_id = create_company(
+            "富士通", database_path=self.database_path
+        )
+        source_id = create_source(
+            self.company_id,
+            "NEC公式",
+            "https://example.com/nec",
+            "企業公式サイト",
+            database_path=self.database_path,
+        )
+
+        with self.assertRaises(sqlite3.DatabaseError):
+            update_source(
+                source_id,
+                other_company_id,
+                "誤更新",
+                "https://example.com/wrong",
+                "その他",
+                database_path=self.database_path,
+            )
+        with self.assertRaises(sqlite3.DatabaseError):
+            delete_source(source_id, other_company_id, self.database_path)
+
+        self.assertEqual(
+            get_source(source_id, self.company_id, self.database_path)["title"],
+            "NEC公式",
+        )
+
+    def test_delete_source_removes_requested_source(self) -> None:
+        source_id = create_source(
+            self.company_id,
+            "削除対象",
+            "https://example.com/delete",
+            "その他",
+            database_path=self.database_path,
+        )
+
+        delete_source(source_id, self.company_id, self.database_path)
+
+        self.assertIsNone(get_source(source_id, self.company_id, self.database_path))
+        self.assertEqual(list_sources(self.company_id, self.database_path), [])
+
+    def test_required_fields_and_url_format_are_validated(self) -> None:
+        invalid_sources = [
+            ("  ", "https://example.com", "その他"),
+            ("タイトル", "", "その他"),
+            ("タイトル", "example.com", "その他"),
+            ("タイトル", "ftp://example.com", "その他"),
+            ("タイトル", "https://example.com/has space", "その他"),
+            ("タイトル", "https://example.com", "  "),
+        ]
+
+        for title, url, source_type in invalid_sources:
+            with self.subTest(title=title, url=url, source_type=source_type):
+                with self.assertRaises(ValueError):
+                    create_source(
+                        self.company_id,
+                        title,
+                        url,
+                        source_type,
+                        database_path=self.database_path,
+                    )
+
+        with self.assertRaises(ValueError):
+            create_source(
+                self.company_id,
+                "日付不正",
+                "https://example.com/date",
+                "その他",
+                "2026-02-30",
+                database_path=self.database_path,
+            )
+        self.assertEqual(list_sources(self.company_id, self.database_path), [])
+
+    def test_publication_date_and_notes_are_optional(self) -> None:
+        source_id = create_source(
+            self.company_id,
+            "日付なし資料",
+            "http://example.com/no-date",
+            "その他",
+            database_path=self.database_path,
+        )
+
+        source = get_source(source_id, self.company_id, self.database_path)
+
+        self.assertIsNone(source["publication_date"])
+        self.assertEqual(source["notes"], "")
+
+    def test_deleting_company_cascades_to_its_sources(self) -> None:
+        source_id = create_source(
+            self.company_id,
+            "カスケード確認",
+            "https://example.com/cascade",
+            "企業公式サイト",
+            database_path=self.database_path,
+        )
+
+        delete_company(self.company_id, self.database_path)
+
+        connection = get_connection(self.database_path)
+        try:
+            source_count = connection.execute(
+                "SELECT COUNT(*) FROM sources WHERE id = ?", (source_id,)
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        self.assertEqual(source_count, 0)
 
 if __name__ == "__main__":
     unittest.main()
