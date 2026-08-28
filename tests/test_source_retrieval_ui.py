@@ -56,7 +56,33 @@ class SourceRetrievalUiTests(unittest.TestCase):
         get_company = database.get_company
         list_sources = database.list_sources
         get_source = database.get_source
+        list_source_contents = database.list_source_contents
+        create_source_content = database.create_source_content
         database_path = self.database_path
+
+        def create_source_content_in_test(
+            source_id,
+            source_url,
+            final_url,
+            page_title,
+            content_type,
+            retrieved_text,
+            character_count,
+            truncated,
+            retrieved_at,
+        ):
+            return create_source_content(
+                source_id,
+                source_url,
+                final_url,
+                page_title,
+                content_type,
+                retrieved_text,
+                character_count,
+                truncated,
+                retrieved_at,
+                database_path,
+            )
 
         return patch.multiple(
             database,
@@ -69,6 +95,11 @@ class SourceRetrievalUiTests(unittest.TestCase):
                 company_id,
                 database_path,
             ),
+            list_source_contents=lambda source_id: list_source_contents(
+                source_id,
+                database_path,
+            ),
+            create_source_content=create_source_content_in_test,
         )
 
     @staticmethod
@@ -116,6 +147,14 @@ class SourceRetrievalUiTests(unittest.TestCase):
             app.button(key=f"retrieve_source_{self.nec_source_id}").click().run()
 
             self.assertEqual(calls, ["https://example.com/nec"])
+            snapshots = database.list_source_contents(
+                self.nec_source_id,
+            )
+            self.assertEqual(len(snapshots), 1)
+            self.assertEqual(
+                snapshots[0]["retrieved_text"],
+                "公開ページから取得した本文です。",
+            )
             rendered_html = "\n".join(self.html_bodies(app))
             self.assertIn("本文取得済み", rendered_html)
             self.assertIn("WEBPAGE CONTENT — RETRIEVED", rendered_html)
@@ -131,6 +170,12 @@ class SourceRetrievalUiTests(unittest.TestCase):
                 )
             )
             self.assertEqual(app.code[0].value, "公開ページから取得した本文です。")
+            self.assertTrue(
+                any(
+                    expander.label == "取得履歴（1件）"
+                    for expander in app.expander
+                )
+            )
 
             app.selectbox(key="company_selector").select(self.bank_id).run()
             self.assertEqual(calls, ["https://example.com/nec"])
@@ -146,6 +191,60 @@ class SourceRetrievalUiTests(unittest.TestCase):
             self.assertNotIn(
                 "取得したNECページ",
                 "\n".join(self.html_bodies(app)),
+            )
+            self.assertEqual(database.list_source_contents(self.bank_source_id), [])
+
+    def test_second_retrieval_creates_snapshot_and_displays_latest(self) -> None:
+        retrieval_number = 0
+
+        def fake_retrieve(source_url: str) -> dict[str, object]:
+            nonlocal retrieval_number
+            retrieval_number += 1
+            text = f"取得本文{retrieval_number}"
+            return {
+                "source_url": source_url,
+                "final_url": source_url,
+                "content_type": "text/html",
+                "retrieved_at": (
+                    "2026-08-28T04:39:00+00:00"
+                    if retrieval_number == 1
+                    else "2026-08-29T05:00:00+00:00"
+                ),
+                "title": f"取得ページ{retrieval_number}",
+                "text": text,
+                "character_count": len(text),
+                "truncated": False,
+            }
+
+        with self.database_patches(), patch(
+            "careerlens.source_retrieval.retrieve_webpage",
+            side_effect=fake_retrieve,
+        ):
+            app = AppTest.from_file(self.page_path).run()
+            app.selectbox(key="company_selector").select(self.nec_id).run()
+            app.button(key=f"retrieve_source_{self.nec_source_id}").click().run()
+
+            self.assertEqual(
+                app.button(key=f"retrieve_source_{self.nec_source_id}").label,
+                "本文を再取得",
+            )
+            app.button(key=f"retrieve_source_{self.nec_source_id}").click().run()
+
+            snapshots = database.list_source_contents(
+                self.nec_source_id,
+            )
+            self.assertEqual(len(snapshots), 2)
+            self.assertEqual(snapshots[0]["retrieved_text"], "取得本文2")
+            self.assertEqual(snapshots[1]["retrieved_text"], "取得本文1")
+            self.assertEqual(app.code[0].value, "取得本文2")
+            rendered_html = "\n".join(self.html_bodies(app))
+            self.assertIn("取得ページ2", rendered_html)
+            self.assertIn("2026/08/29 14:00 JST", rendered_html)
+            self.assertTrue(
+                any(
+                    expander.label == "取得履歴（2件）"
+                    for expander in app.expander
+                )
             )
 
     def test_unsafe_url_failure_uses_safe_japanese_message(self) -> None:
@@ -166,6 +265,7 @@ class SourceRetrievalUiTests(unittest.TestCase):
                 [error.value for error in app.error],
             )
             self.assertFalse(app.expander)
+            self.assertEqual(database.list_source_contents(self.nec_source_id), [])
 
     def test_pdf_failure_explains_current_limitation(self) -> None:
         with self.database_patches(), patch(
@@ -181,6 +281,7 @@ class SourceRetrievalUiTests(unittest.TestCase):
                 [error.value for error in app.error],
             )
             self.assertFalse(app.expander)
+            self.assertEqual(database.list_source_contents(self.nec_source_id), [])
 
 
 if __name__ == "__main__":

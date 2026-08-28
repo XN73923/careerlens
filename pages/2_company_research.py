@@ -11,12 +11,14 @@ import streamlit as st
 from careerlens.database import (
     create_company,
     create_source,
+    create_source_content,
     delete_company,
     delete_source,
     get_company,
     get_source,
     initialize_database,
     list_companies,
+    list_source_contents,
     list_sources,
     update_company,
     update_source,
@@ -409,7 +411,6 @@ def render_delete_confirmation(company: dict[str, object]) -> None:
             st.error("企業情報を削除できませんでした。時間をおいて再度お試しください。")
             return
 
-        clear_company_retrievals(company_id)
         st.session_state["company_pending_selection"] = None
         st.session_state["company_mode"] = "view"
         st.session_state["source_mode"] = "view"
@@ -428,26 +429,6 @@ def show_source_feedback() -> None:
     feedback = st.session_state.pop("source_feedback", None)
     if feedback:
         st.success(feedback)
-
-
-def source_retrieval_key(company_id: int, source_id: int) -> str:
-    """Return a company-scoped key for one ephemeral retrieval result."""
-    return f"{company_id}:{source_id}"
-
-
-def clear_source_retrieval(company_id: int, source_id: int) -> None:
-    """Discard a session-only preview when its saved source changes."""
-    results = st.session_state.get("source_retrieval_results", {})
-    results.pop(source_retrieval_key(company_id, source_id), None)
-
-
-def clear_company_retrievals(company_id: int) -> None:
-    """Discard all session-only previews for a deleted company."""
-    results = st.session_state.get("source_retrieval_results", {})
-    company_prefix = f"{company_id}:"
-    for result_key in list(results):
-        if result_key.startswith(company_prefix):
-            results.pop(result_key, None)
 
 
 def format_retrieval_timestamp(value: object) -> str:
@@ -601,7 +582,6 @@ def render_source_form(
                 publication_date_text,
                 notes,
             )
-            clear_source_retrieval(company_id, source_id)
             message = "情報源を更新しました。"
         else:
             create_source(
@@ -631,22 +611,17 @@ def render_source_form(
 
 def render_retrieved_source_preview(
     source: dict[str, object],
-    result: dict[str, object],
+    snapshot: dict[str, object],
 ) -> None:
-    """Render session-only source text as retrieved, not verified, evidence."""
-    source_id = int(source["id"])
-    safe_title = html.escape(str(result.get("title") or source["title"]))
-    safe_source_url = html.escape(str(result["source_url"]))
-    safe_final_url = html.escape(str(result["final_url"]))
-    safe_content_type = html.escape(str(result["content_type"]))
-    timestamp = html.escape(format_retrieval_timestamp(result["retrieved_at"]))
-    character_count = int(result["character_count"])
-    final_url_html = ""
-    if result["final_url"] != result["source_url"]:
-        final_url_html = (
-            '<div class="source-retrieval-url">'
-            f"最終URL：{safe_final_url}</div>"
-        )
+    """Render the latest persisted source text as retrieved evidence."""
+    safe_title = html.escape(str(snapshot.get("page_title") or source["title"]))
+    safe_source_url = html.escape(str(snapshot["source_url"]))
+    safe_final_url = html.escape(
+        str(snapshot.get("final_url") or snapshot["source_url"])
+    )
+    safe_content_type = html.escape(str(snapshot.get("content_type") or "不明"))
+    timestamp = html.escape(format_retrieval_timestamp(snapshot["retrieved_at"]))
+    character_count = int(snapshot["character_count"])
 
     st.html(
         f"""
@@ -655,7 +630,7 @@ def render_retrieved_source_preview(
             <h4>URL先の公開ページから取得した本文</h4>
             <p class="source-retrieval-title">{safe_title}</p>
             <div class="source-retrieval-url">取得元：{safe_source_url}</div>
-            {final_url_html}
+            <div class="source-retrieval-url">最終URL：{safe_final_url}</div>
             <div class="source-retrieval-details">
                 <span>{timestamp}</span>
                 <span>{safe_content_type}</span>
@@ -669,7 +644,7 @@ def render_retrieved_source_preview(
         """
     )
 
-    text = str(result["text"])
+    text = str(snapshot["retrieved_text"])
     preview = text[:SOURCE_PREVIEW_CHARACTERS]
     with st.expander("取得本文をプレビュー"):
         st.code(preview, language=None, wrap_lines=True)
@@ -678,15 +653,44 @@ def render_retrieved_source_preview(
                 f"プレビューは先頭{SOURCE_PREVIEW_CHARACTERS:,}文字です。"
                 f"取得本文は全{character_count:,}文字です。"
             )
-        if bool(result.get("truncated")):
+        if bool(snapshot.get("truncated")):
             st.warning("安全上の上限により、取得本文の一部のみを表示しています。")
 
 
-def retrieve_source_for_preview(company_id: int, source_id: int) -> None:
-    """Retrieve one owned source after an explicit user action."""
-    result_key = source_retrieval_key(company_id, source_id)
-    st.session_state["source_retrieval_results"].pop(result_key, None)
+def render_source_content_history(snapshots: list[dict[str, object]]) -> None:
+    """Show compact provenance metadata without expanding every stored body."""
+    with st.expander(f"取得履歴（{len(snapshots)}件）"):
+        for index, snapshot in enumerate(snapshots):
+            latest_label = (
+                '<span class="snapshot-latest">最新</span>'
+                if index == 0
+                else ""
+            )
+            timestamp = html.escape(
+                format_retrieval_timestamp(snapshot["retrieved_at"])
+            )
+            content_type = html.escape(
+                str(snapshot.get("content_type") or "不明")
+            )
+            character_count = int(snapshot["character_count"])
+            snapshot_id = int(snapshot["id"])
+            st.html(
+                f"""
+                <div class="snapshot-history-row">
+                    <div>
+                        <strong>{timestamp}</strong>
+                        {latest_label}
+                    </div>
+                    <div class="snapshot-history-meta">
+                        Snapshot #{snapshot_id} · {character_count:,}文字 · {content_type}
+                    </div>
+                </div>
+                """
+            )
 
+
+def retrieve_source_for_preview(company_id: int, source_id: int) -> None:
+    """Retrieve one owned source and persist one immutable snapshot."""
     try:
         owned_source = get_source(source_id, company_id)
     except sqlite3.Error:
@@ -707,8 +711,23 @@ def retrieve_source_for_preview(company_id: int, source_id: int) -> None:
         st.error("ページの取得に失敗しました。")
         return
 
-    st.session_state["source_retrieval_results"][result_key] = result
-    set_source_feedback("ページ本文を取得しました。")
+    try:
+        create_source_content(
+            source_id,
+            str(result["source_url"]),
+            str(result["final_url"]) if result.get("final_url") else None,
+            str(result["title"]) if result.get("title") else None,
+            str(result["content_type"]) if result.get("content_type") else None,
+            str(result["text"]),
+            int(result["character_count"]),
+            bool(result.get("truncated")),
+            str(result["retrieved_at"]),
+        )
+    except (sqlite3.Error, ValueError):
+        st.error("取得したページ本文を保存できませんでした。再度お試しください。")
+        return
+
+    set_source_feedback("ページ本文を取得し、スナップショットを保存しました。")
     st.rerun()
 
 
@@ -720,10 +739,16 @@ def render_source_card(source: dict[str, object], company_id: int) -> None:
     publication_date = source["publication_date"]
     notes = str(source["notes"]).strip()
     source_id = int(source["id"])
-    result_key = source_retrieval_key(company_id, source_id)
-    retrieval_result = st.session_state["source_retrieval_results"].get(result_key)
-    retrieval_status = "本文取得済み" if retrieval_result else "本文未取得"
-    retrieval_status_class = " is-retrieved" if retrieval_result else ""
+    try:
+        snapshots = list_source_contents(source_id)
+    except sqlite3.Error:
+        st.error(
+            "取得履歴を読み込めませんでした。時間をおいて再度お試しください。"
+        )
+        snapshots = []
+    latest_snapshot = snapshots[0] if snapshots else None
+    retrieval_status = "本文取得済み" if latest_snapshot else "本文未取得"
+    retrieval_status_class = " is-retrieved" if latest_snapshot else ""
 
     date_html = (
         f'<span class="source-date">公開日 {html.escape(str(publication_date))}</span>'
@@ -765,14 +790,11 @@ def render_source_card(source: dict[str, object], company_id: int) -> None:
             )
         with retrieve_column:
             if st.button(
-                "本文を取得",
+                "本文を再取得" if latest_snapshot else "本文を取得",
                 use_container_width=True,
                 key=f"retrieve_source_{source_id}",
             ):
                 retrieve_source_for_preview(company_id, source_id)
-                retrieval_result = st.session_state[
-                    "source_retrieval_results"
-                ].get(result_key)
         with edit_column:
             if st.button(
                 "編集",
@@ -792,8 +814,9 @@ def render_source_card(source: dict[str, object], company_id: int) -> None:
                 st.session_state["source_mode"] = "delete"
                 st.rerun()
 
-        if retrieval_result:
-            render_retrieved_source_preview(source, retrieval_result)
+        if latest_snapshot:
+            render_retrieved_source_preview(source, latest_snapshot)
+            render_source_content_history(snapshots)
 
 
 def render_source_delete_confirmation(
@@ -840,7 +863,6 @@ def render_source_delete_confirmation(
             st.error("情報源を削除できませんでした。時間をおいて再度お試しください。")
             return
 
-        clear_source_retrieval(company_id, source_id)
         st.session_state["source_mode"] = "view"
         st.session_state.pop("active_source_id", None)
         set_source_feedback("情報源を削除しました。")
@@ -1386,6 +1408,34 @@ st.html(
             line-height: 1.6;
         }
 
+        .snapshot-history-row {
+            padding: 0.8rem 0.15rem;
+            border-bottom: 1px solid var(--cl-border);
+            color: var(--cl-navy);
+            font-size: 0.82rem;
+        }
+
+        .snapshot-history-row:last-child {
+            border-bottom: 0;
+        }
+
+        .snapshot-latest {
+            display: inline-flex;
+            margin-left: 0.5rem;
+            padding: 0.12rem 0.45rem;
+            background: var(--cl-blue-soft);
+            border-radius: 999px;
+            color: var(--cl-blue);
+            font-size: 0.68rem;
+            font-weight: 750;
+        }
+
+        .snapshot-history-meta {
+            margin-top: 0.25rem;
+            color: var(--cl-muted);
+            font-size: 0.74rem;
+        }
+
         .sources-empty-state {
             margin-top: 1rem;
             padding: 1.5rem;
@@ -1444,7 +1494,6 @@ initialize_database()
 st.session_state.setdefault("company_mode", "view")
 st.session_state.setdefault("source_mode", "view")
 st.session_state.setdefault("company_create_form_version", 0)
-st.session_state.setdefault("source_retrieval_results", {})
 
 st.html(
     """

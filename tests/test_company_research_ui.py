@@ -29,6 +29,7 @@ class CompanyResearchUiTests(unittest.TestCase):
         update_company = database.update_company
         delete_company = database.delete_company
         list_sources = database.list_sources
+        list_source_contents = database.list_source_contents
         get_source = database.get_source
         create_source = database.create_source
         update_source = database.update_source
@@ -67,6 +68,10 @@ class CompanyResearchUiTests(unittest.TestCase):
                 company_id, database_path
             ),
             list_sources=lambda company_id: list_sources(company_id, database_path),
+            list_source_contents=lambda source_id: list_source_contents(
+                source_id,
+                database_path,
+            ),
             get_source=lambda source_id, company_id: get_source(
                 source_id, company_id, database_path
             ),

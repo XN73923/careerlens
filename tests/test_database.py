@@ -12,15 +12,19 @@ from careerlens.database import (
     create_experience,
     create_job_axis,
     create_source,
+    create_source_content,
     delete_company,
     delete_experience,
     delete_job_axis,
     delete_source,
+    delete_source_content,
     get_connection,
     get_ai_result,
     get_company,
     get_experience,
     get_source,
+    get_source_content,
+    get_latest_source_content,
     get_user_profile,
     initialize_database,
     list_companies,
@@ -28,6 +32,7 @@ from careerlens.database import (
     list_experiences,
     list_job_axes,
     list_sources,
+    list_source_contents,
     move_job_axis_down,
     move_job_axis_up,
     update_company,
@@ -800,6 +805,205 @@ class SourceDatabaseTests(unittest.TestCase):
         finally:
             connection.close()
         self.assertEqual(source_count, 0)
+
+
+class SourceContentDatabaseTests(unittest.TestCase):
+    """Verify immutable source snapshots, provenance, and ownership isolation."""
+
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.database_path = Path(self.temporary_directory.name) / "careerlens.db"
+        initialize_database(self.database_path)
+        self.company_id = create_company(
+            "NEC",
+            database_path=self.database_path,
+        )
+        self.source_id = create_source(
+            self.company_id,
+            "NEC公式サイト",
+            "https://example.com/nec",
+            "企業公式サイト",
+            database_path=self.database_path,
+        )
+
+    def tearDown(self) -> None:
+        self.temporary_directory.cleanup()
+
+    def create_snapshot(
+        self,
+        *,
+        source_id: int | None = None,
+        text: str = "取得した企業情報の全文です。\n二行目も保持します。",
+        retrieved_at: str = "2026-08-28T04:39:00+00:00",
+        truncated: bool = False,
+    ) -> int:
+        """Create one representative persisted webpage snapshot."""
+        return create_source_content(
+            source_id or self.source_id,
+            "https://example.com/nec",
+            "https://www.example.com/nec/final",
+            "NEC企業サイト",
+            "text/html",
+            text,
+            len(text),
+            truncated,
+            retrieved_at,
+            self.database_path,
+        )
+
+    def test_create_and_read_snapshot_preserves_provenance_and_full_text(self) -> None:
+        full_text = "先頭の本文です。\n空白や改行を含む取得済み全文です。"
+        content_id = self.create_snapshot(text=full_text, truncated=True)
+
+        content = get_source_content(content_id, self.database_path)
+
+        self.assertEqual(content["source_id"], self.source_id)
+        self.assertEqual(content["source_url"], "https://example.com/nec")
+        self.assertEqual(
+            content["final_url"],
+            "https://www.example.com/nec/final",
+        )
+        self.assertEqual(content["page_title"], "NEC企業サイト")
+        self.assertEqual(content["content_type"], "text/html")
+        self.assertEqual(content["retrieved_text"], full_text)
+        self.assertEqual(content["character_count"], len(full_text))
+        self.assertTrue(content["truncated"])
+        self.assertEqual(
+            content["retrieved_at"],
+            "2026-08-28T04:39:00+00:00",
+        )
+        self.assertIsNotNone(content["created_at"])
+
+    def test_multiple_retrievals_create_distinct_snapshots_and_latest(self) -> None:
+        first_id = self.create_snapshot(
+            text="最初の取得本文",
+            retrieved_at="2026-08-28T04:39:00+00:00",
+        )
+        second_id = self.create_snapshot(
+            text="更新後の取得本文",
+            retrieved_at="2026-08-29T01:00:00+00:00",
+        )
+
+        contents = list_source_contents(self.source_id, self.database_path)
+        latest = get_latest_source_content(self.source_id, self.database_path)
+
+        self.assertNotEqual(first_id, second_id)
+        self.assertEqual(
+            [content["id"] for content in contents],
+            [second_id, first_id],
+        )
+        self.assertEqual(contents[0]["retrieved_text"], "更新後の取得本文")
+        self.assertEqual(contents[1]["retrieved_text"], "最初の取得本文")
+        self.assertEqual(latest["id"], second_id)
+
+    def test_snapshots_are_isolated_between_sources_and_companies(self) -> None:
+        second_source_id = create_source(
+            self.company_id,
+            "NEC採用サイト",
+            "https://example.com/nec/careers",
+            "採用サイト",
+            database_path=self.database_path,
+        )
+        other_company_id = create_company(
+            "横浜銀行",
+            database_path=self.database_path,
+        )
+        other_source_id = create_source(
+            other_company_id,
+            "横浜銀行公式サイト",
+            "https://example.com/bank",
+            "企業公式サイト",
+            database_path=self.database_path,
+        )
+
+        first_id = self.create_snapshot(text="NEC公式本文")
+        second_id = self.create_snapshot(
+            source_id=second_source_id,
+            text="NEC採用本文",
+        )
+        other_id = self.create_snapshot(
+            source_id=other_source_id,
+            text="横浜銀行本文",
+        )
+
+        self.assertEqual(
+            [
+                item["id"]
+                for item in list_source_contents(
+                    self.source_id,
+                    self.database_path,
+                )
+            ],
+            [first_id],
+        )
+        self.assertEqual(
+            [
+                item["id"]
+                for item in list_source_contents(second_source_id, self.database_path)
+            ],
+            [second_id],
+        )
+        self.assertEqual(
+            [
+                item["id"]
+                for item in list_source_contents(other_source_id, self.database_path)
+            ],
+            [other_id],
+        )
+
+    def test_deleting_source_cascades_to_all_snapshots(self) -> None:
+        first_id = self.create_snapshot(text="取得本文1")
+        second_id = self.create_snapshot(text="取得本文2")
+
+        delete_source(self.source_id, self.company_id, self.database_path)
+
+        self.assertIsNone(get_source_content(first_id, self.database_path))
+        self.assertIsNone(get_source_content(second_id, self.database_path))
+        self.assertEqual(
+            list_source_contents(self.source_id, self.database_path),
+            [],
+        )
+
+    def test_delete_one_snapshot_preserves_its_source_and_other_snapshots(self) -> None:
+        first_id = self.create_snapshot(text="取得本文1")
+        second_id = self.create_snapshot(text="取得本文2")
+
+        delete_source_content(second_id, self.database_path)
+
+        self.assertIsNone(get_source_content(second_id, self.database_path))
+        self.assertEqual(
+            [
+                item["id"]
+                for item in list_source_contents(self.source_id, self.database_path)
+            ],
+            [first_id],
+        )
+        self.assertIsNotNone(
+            get_source(self.source_id, self.company_id, self.database_path)
+        )
+
+    def test_initialization_adds_snapshot_table_without_losing_existing_data(self) -> None:
+        connection = get_connection(self.database_path)
+        try:
+            connection.execute("DROP TABLE source_contents")
+            connection.commit()
+        finally:
+            connection.close()
+
+        initialize_database(self.database_path)
+
+        self.assertEqual(
+            get_company(self.company_id, self.database_path)["name"],
+            "NEC",
+        )
+        self.assertEqual(
+            get_source(self.source_id, self.company_id, self.database_path)["title"],
+            "NEC公式サイト",
+        )
+        self.assertEqual(
+            list_source_contents(self.source_id, self.database_path),
+            [],
+        )
 
 
 class AIResultDatabaseTests(unittest.TestCase):

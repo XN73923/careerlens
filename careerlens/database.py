@@ -66,6 +66,21 @@ CREATE TABLE IF NOT EXISTS sources (
     FOREIGN KEY (company_id) REFERENCES companies (id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS source_contents (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id INTEGER NOT NULL,
+    source_url TEXT NOT NULL,
+    final_url TEXT,
+    page_title TEXT,
+    content_type TEXT,
+    retrieved_text TEXT NOT NULL,
+    character_count INTEGER NOT NULL CHECK (character_count >= 0),
+    truncated INTEGER NOT NULL DEFAULT 0 CHECK (truncated IN (0, 1)),
+    retrieved_at TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (source_id) REFERENCES sources (id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS ai_results (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     company_id INTEGER NOT NULL,
@@ -946,6 +961,163 @@ def delete_source(
         )
         if cursor.rowcount != 1:
             raise sqlite3.DatabaseError("The source was not found for this company.")
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _source_content_from_row(row: tuple[object, ...]) -> dict[str, object]:
+    """Convert a persisted retrieval snapshot into an application dictionary."""
+    return {
+        "id": row[0],
+        "source_id": row[1],
+        "source_url": row[2],
+        "final_url": row[3],
+        "page_title": row[4],
+        "content_type": row[5],
+        "retrieved_text": row[6],
+        "character_count": row[7],
+        "truncated": bool(row[8]),
+        "retrieved_at": row[9],
+        "created_at": row[10],
+    }
+
+
+def create_source_content(
+    source_id: int,
+    source_url: str,
+    final_url: str | None,
+    page_title: str | None,
+    content_type: str | None,
+    retrieved_text: str,
+    character_count: int,
+    truncated: bool,
+    retrieved_at: str,
+    database_path: str | Path = DATABASE_PATH,
+) -> int:
+    """Persist one immutable webpage retrieval snapshot and return its ID."""
+    if not isinstance(source_url, str) or not source_url.strip():
+        raise ValueError("A source snapshot URL is required.")
+    if not isinstance(retrieved_text, str) or not retrieved_text:
+        raise ValueError("Retrieved source text is required.")
+    if not isinstance(character_count, int) or character_count < 0:
+        raise ValueError("The source character count must be non-negative.")
+    if not isinstance(retrieved_at, str) or not retrieved_at.strip():
+        raise ValueError("A source retrieval timestamp is required.")
+
+    connection = get_connection(database_path)
+    try:
+        cursor = connection.execute(
+            """
+            INSERT INTO source_contents (
+                source_id, source_url, final_url, page_title, content_type,
+                retrieved_text, character_count, truncated, retrieved_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                source_id,
+                source_url.strip(),
+                final_url.strip() if final_url else None,
+                page_title,
+                content_type.strip() if content_type else None,
+                retrieved_text,
+                character_count,
+                int(bool(truncated)),
+                retrieved_at.strip(),
+            ),
+        )
+        connection.commit()
+        return cursor.lastrowid
+    finally:
+        connection.close()
+
+
+def get_source_content(
+    content_id: int,
+    database_path: str | Path = DATABASE_PATH,
+) -> dict[str, object] | None:
+    """Return one retrieval snapshot, or None when it does not exist."""
+    connection = get_connection(database_path)
+    try:
+        content = connection.execute(
+            """
+            SELECT id, source_id, source_url, final_url, page_title, content_type,
+                   retrieved_text, character_count, truncated, retrieved_at,
+                   created_at
+            FROM source_contents
+            WHERE id = ?
+            """,
+            (content_id,),
+        ).fetchone()
+    finally:
+        connection.close()
+
+    return _source_content_from_row(content) if content is not None else None
+
+
+def list_source_contents(
+    source_id: int,
+    database_path: str | Path = DATABASE_PATH,
+) -> list[dict[str, object]]:
+    """Return all snapshots for one Source, newest retrieval first."""
+    connection = get_connection(database_path)
+    try:
+        contents = connection.execute(
+            """
+            SELECT id, source_id, source_url, final_url, page_title, content_type,
+                   retrieved_text, character_count, truncated, retrieved_at,
+                   created_at
+            FROM source_contents
+            WHERE source_id = ?
+            ORDER BY retrieved_at DESC, id DESC
+            """,
+            (source_id,),
+        ).fetchall()
+    finally:
+        connection.close()
+
+    return [_source_content_from_row(content) for content in contents]
+
+
+def get_latest_source_content(
+    source_id: int,
+    database_path: str | Path = DATABASE_PATH,
+) -> dict[str, object] | None:
+    """Return the newest retrieval snapshot for one Source."""
+    connection = get_connection(database_path)
+    try:
+        content = connection.execute(
+            """
+            SELECT id, source_id, source_url, final_url, page_title, content_type,
+                   retrieved_text, character_count, truncated, retrieved_at,
+                   created_at
+            FROM source_contents
+            WHERE source_id = ?
+            ORDER BY retrieved_at DESC, id DESC
+            LIMIT 1
+            """,
+            (source_id,),
+        ).fetchone()
+    finally:
+        connection.close()
+
+    return _source_content_from_row(content) if content is not None else None
+
+
+def delete_source_content(
+    content_id: int,
+    database_path: str | Path = DATABASE_PATH,
+) -> None:
+    """Delete one retrieval snapshot without changing its Source metadata."""
+    connection = get_connection(database_path)
+    try:
+        cursor = connection.execute(
+            "DELETE FROM source_contents WHERE id = ?",
+            (content_id,),
+        )
+        if cursor.rowcount != 1:
+            raise sqlite3.DatabaseError("The source content snapshot was not found.")
         connection.commit()
     finally:
         connection.close()
