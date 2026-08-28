@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 from careerlens.database import (
+    create_ai_result,
     create_company,
     create_experience,
     create_job_axis,
@@ -16,12 +17,14 @@ from careerlens.database import (
     delete_job_axis,
     delete_source,
     get_connection,
+    get_ai_result,
     get_company,
     get_experience,
     get_source,
     get_user_profile,
     initialize_database,
     list_companies,
+    list_ai_results,
     list_experiences,
     list_job_axes,
     list_sources,
@@ -797,6 +800,143 @@ class SourceDatabaseTests(unittest.TestCase):
         finally:
             connection.close()
         self.assertEqual(source_count, 0)
+
+
+class AIResultDatabaseTests(unittest.TestCase):
+    """Verify structured AI result persistence and company isolation."""
+
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.database_path = Path(self.temporary_directory.name) / "careerlens.db"
+        initialize_database(self.database_path)
+        self.first_company_id = create_company(
+            "NEC", database_path=self.database_path
+        )
+        self.second_company_id = create_company(
+            "横浜銀行", database_path=self.database_path
+        )
+
+    def tearDown(self) -> None:
+        self.temporary_directory.cleanup()
+
+    def test_create_and_get_ai_result_serializes_json(self) -> None:
+        generated_content = {
+            "version": "0.1",
+            "model": "test-model",
+            "selected_source_ids": [1, 2],
+            "source_bodies_retrieved": False,
+            "generated_result": {"limitations": ["本文未取得"]},
+        }
+
+        result_id = create_ai_result(
+            self.first_company_id,
+            "research_assistant_v0_1",
+            generated_content,
+            self.database_path,
+        )
+        result = get_ai_result(result_id, self.database_path)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result["company_id"], self.first_company_id)
+        self.assertEqual(result["result_type"], "research_assistant_v0_1")
+        self.assertEqual(result["generated_content"], generated_content)
+        self.assertIsNotNone(result["created_at"])
+
+        connection = get_connection(self.database_path)
+        try:
+            stored_json = connection.execute(
+                "SELECT generated_content FROM ai_results WHERE id = ?",
+                (result_id,),
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        self.assertEqual(json.loads(stored_json), generated_content)
+
+    def test_list_ai_results_isolated_by_company_and_newest_first(self) -> None:
+        first_id = create_ai_result(
+            self.first_company_id,
+            "research_assistant_v0_1",
+            {"company": "NEC", "sequence": 1},
+            self.database_path,
+        )
+        second_id = create_ai_result(
+            self.first_company_id,
+            "research_assistant_v0_1",
+            {"company": "NEC", "sequence": 2},
+            self.database_path,
+        )
+        other_id = create_ai_result(
+            self.second_company_id,
+            "research_assistant_v0_1",
+            {"company": "横浜銀行"},
+            self.database_path,
+        )
+
+        first_results = list_ai_results(
+            self.first_company_id, database_path=self.database_path
+        )
+        second_results = list_ai_results(
+            self.second_company_id, database_path=self.database_path
+        )
+
+        self.assertEqual(
+            [result["id"] for result in first_results],
+            [second_id, first_id],
+        )
+        self.assertEqual(
+            [result["id"] for result in second_results],
+            [other_id],
+        )
+
+    def test_result_type_filter_returns_only_requested_type(self) -> None:
+        assistant_id = create_ai_result(
+            self.first_company_id,
+            "research_assistant_v0_1",
+            {"kind": "assistant"},
+            self.database_path,
+        )
+        create_ai_result(
+            self.first_company_id,
+            "other_result",
+            {"kind": "other"},
+            self.database_path,
+        )
+
+        results = list_ai_results(
+            self.first_company_id,
+            "research_assistant_v0_1",
+            self.database_path,
+        )
+
+        self.assertEqual([result["id"] for result in results], [assistant_id])
+
+    def test_ai_result_requires_valid_type_and_json_object(self) -> None:
+        with self.assertRaises(ValueError):
+            create_ai_result(
+                self.first_company_id,
+                "  ",
+                {},
+                self.database_path,
+            )
+        with self.assertRaises(ValueError):
+            create_ai_result(
+                self.first_company_id,
+                "research_assistant_v0_1",
+                {"invalid": {1, 2}},
+                self.database_path,
+            )
+
+    def test_deleting_company_cascades_to_its_ai_results(self) -> None:
+        result_id = create_ai_result(
+            self.first_company_id,
+            "research_assistant_v0_1",
+            {"company": "NEC"},
+            self.database_path,
+        )
+
+        delete_company(self.first_company_id, self.database_path)
+
+        self.assertIsNone(get_ai_result(result_id, self.database_path))
 
 if __name__ == "__main__":
     unittest.main()

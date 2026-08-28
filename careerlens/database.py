@@ -949,3 +949,116 @@ def delete_source(
         connection.commit()
     finally:
         connection.close()
+
+
+def _deserialize_ai_content(generated_content_json: str) -> dict[str, object]:
+    """Return stored AI result JSON as a dictionary, or an empty value if corrupt."""
+    try:
+        generated_content = json.loads(generated_content_json)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+    return generated_content if isinstance(generated_content, dict) else {}
+
+
+def _ai_result_from_row(row: tuple[object, ...]) -> dict[str, object]:
+    """Convert an AI result database row into an application dictionary."""
+    return {
+        "id": row[0],
+        "company_id": row[1],
+        "result_type": row[2],
+        "generated_content": _deserialize_ai_content(str(row[3])),
+        "created_at": row[4],
+    }
+
+
+def create_ai_result(
+    company_id: int,
+    result_type: str,
+    generated_content: dict[str, object],
+    database_path: str | Path = DATABASE_PATH,
+) -> int:
+    """Store one structured AI result with its provenance and return its ID."""
+    normalized_result_type = result_type.strip()
+    if not normalized_result_type:
+        raise ValueError("An AI result type is required.")
+    if not isinstance(generated_content, dict):
+        raise ValueError("Generated AI content must be a dictionary.")
+
+    try:
+        generated_content_json = json.dumps(
+            generated_content,
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as error:
+        raise ValueError("Generated AI content must be JSON serializable.") from error
+
+    connection = get_connection(database_path)
+    try:
+        cursor = connection.execute(
+            """
+            INSERT INTO ai_results (company_id, result_type, generated_content)
+            VALUES (?, ?, ?)
+            """,
+            (company_id, normalized_result_type, generated_content_json),
+        )
+        connection.commit()
+        return cursor.lastrowid
+    finally:
+        connection.close()
+
+
+def list_ai_results(
+    company_id: int,
+    result_type: str | None = None,
+    database_path: str | Path = DATABASE_PATH,
+) -> list[dict[str, object]]:
+    """Return one company's AI results, optionally filtered by result type."""
+    connection = get_connection(database_path)
+    try:
+        if result_type is None:
+            results = connection.execute(
+                """
+                SELECT id, company_id, result_type, generated_content, created_at
+                FROM ai_results
+                WHERE company_id = ?
+                ORDER BY id DESC
+                """,
+                (company_id,),
+            ).fetchall()
+        else:
+            results = connection.execute(
+                """
+                SELECT id, company_id, result_type, generated_content, created_at
+                FROM ai_results
+                WHERE company_id = ? AND result_type = ?
+                ORDER BY id DESC
+                """,
+                (company_id, result_type.strip()),
+            ).fetchall()
+    finally:
+        connection.close()
+
+    return [_ai_result_from_row(result) for result in results]
+
+
+def get_ai_result(
+    result_id: int,
+    database_path: str | Path = DATABASE_PATH,
+) -> dict[str, object] | None:
+    """Return one stored AI result, or None when it does not exist."""
+    connection = get_connection(database_path)
+    try:
+        result = connection.execute(
+            """
+            SELECT id, company_id, result_type, generated_content, created_at
+            FROM ai_results
+            WHERE id = ?
+            """,
+            (result_id,),
+        ).fetchone()
+    finally:
+        connection.close()
+
+    return _ai_result_from_row(result) if result is not None else None
