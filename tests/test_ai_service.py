@@ -101,6 +101,7 @@ class AIServiceTests(unittest.TestCase):
             "publication_date": "2026-06-30",
             "notes": "戦略確認用",
             "created_at": "2026-08-01 00:00:00",
+            "retrieved_content": "送信してはいけない取得本文",
         }
 
     def test_build_input_contains_only_allowed_company_and_source_fields(self) -> None:
@@ -138,6 +139,7 @@ class AIServiceTests(unittest.TestCase):
         self.assertNotIn("送信してはいけない就活軸", serialized_input)
         self.assertNotIn("送信してはいけない経験", serialized_input)
         self.assertNotIn("created_at", serialized_input)
+        self.assertNotIn("送信してはいけない取得本文", serialized_input)
         self.assertEqual(
             research_input["source_content_retrieval"], "not_performed"
         )

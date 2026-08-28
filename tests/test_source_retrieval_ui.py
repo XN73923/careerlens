@@ -1,0 +1,187 @@
+"""UI regression tests for session-only webpage retrieval previews."""
+
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from streamlit.testing.v1 import AppTest
+
+import careerlens.database as database
+from careerlens.source_retrieval import (
+    PDFSourceUnsupportedError,
+    UnsafeSourceURLError,
+)
+
+
+class SourceRetrievalUiTests(unittest.TestCase):
+    """Verify retrieval is explicit, reviewable, and company-scoped."""
+
+    def setUp(self) -> None:
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.database_path = Path(self.temporary_directory.name) / "careerlens.db"
+        database.initialize_database(self.database_path)
+        self.nec_id = database.create_company("NEC", database_path=self.database_path)
+        self.bank_id = database.create_company(
+            "横浜銀行",
+            database_path=self.database_path,
+        )
+        self.nec_source_id = database.create_source(
+            self.nec_id,
+            "NEC公式サイト",
+            "https://example.com/nec",
+            "企業公式サイト",
+            database_path=self.database_path,
+        )
+        self.bank_source_id = database.create_source(
+            self.bank_id,
+            "横浜銀行公式サイト",
+            "https://example.com/bank",
+            "企業公式サイト",
+            database_path=self.database_path,
+        )
+        self.page_path = (
+            Path(__file__).resolve().parents[1]
+            / "pages"
+            / "2_company_research.py"
+        )
+
+    def tearDown(self) -> None:
+        self.temporary_directory.cleanup()
+
+    def database_patches(self):
+        """Route page reads to the temporary database."""
+        initialize_database = database.initialize_database
+        list_companies = database.list_companies
+        get_company = database.get_company
+        list_sources = database.list_sources
+        get_source = database.get_source
+        database_path = self.database_path
+
+        return patch.multiple(
+            database,
+            initialize_database=lambda: initialize_database(database_path),
+            list_companies=lambda: list_companies(database_path),
+            get_company=lambda company_id: get_company(company_id, database_path),
+            list_sources=lambda company_id: list_sources(company_id, database_path),
+            get_source=lambda source_id, company_id: get_source(
+                source_id,
+                company_id,
+                database_path,
+            ),
+        )
+
+    @staticmethod
+    def html_bodies(app: AppTest) -> list[str]:
+        """Return rendered custom HTML bodies from an AppTest run."""
+        return [element.proto.body for element in app.get("html")]
+
+    def test_retrieval_requires_click_and_preview_stays_company_scoped(self) -> None:
+        calls: list[str] = []
+
+        def fake_retrieve(source_url: str) -> dict[str, object]:
+            calls.append(source_url)
+            return {
+                "source_url": source_url,
+                "final_url": f"{source_url}/final",
+                "content_type": "text/html",
+                "retrieved_at": "2026-08-28T04:39:00+00:00",
+                "title": "取得したNECページ",
+                "text": "公開ページから取得した本文です。",
+                "character_count": 16,
+                "truncated": False,
+            }
+
+        with self.database_patches(), patch(
+            "careerlens.source_retrieval.retrieve_webpage",
+            side_effect=fake_retrieve,
+        ):
+            app = AppTest.from_file(self.page_path).run()
+            app.selectbox(key="company_selector").select(self.nec_id).run()
+
+            self.assertEqual(calls, [])
+            visible_button_keys = {button.key for button in app.button}
+            self.assertIn(
+                f"retrieve_source_{self.nec_source_id}",
+                visible_button_keys,
+            )
+            self.assertNotIn(
+                f"retrieve_source_{self.bank_source_id}",
+                visible_button_keys,
+            )
+            self.assertTrue(
+                any("本文未取得" in body for body in self.html_bodies(app))
+            )
+
+            app.button(key=f"retrieve_source_{self.nec_source_id}").click().run()
+
+            self.assertEqual(calls, ["https://example.com/nec"])
+            rendered_html = "\n".join(self.html_bodies(app))
+            self.assertIn("本文取得済み", rendered_html)
+            self.assertIn("WEBPAGE CONTENT — RETRIEVED", rendered_html)
+            self.assertIn("URL先の公開ページから取得した本文", rendered_html)
+            self.assertIn("2026/08/28 13:39 JST", rendered_html)
+            self.assertIn("text/html", rendered_html)
+            self.assertIn("16文字", rendered_html)
+            self.assertIn("検証済みであること", rendered_html)
+            self.assertTrue(
+                any(
+                    expander.label == "取得本文をプレビュー"
+                    for expander in app.expander
+                )
+            )
+            self.assertEqual(app.code[0].value, "公開ページから取得した本文です。")
+
+            app.selectbox(key="company_selector").select(self.bank_id).run()
+            self.assertEqual(calls, ["https://example.com/nec"])
+            visible_button_keys = {button.key for button in app.button}
+            self.assertIn(
+                f"retrieve_source_{self.bank_source_id}",
+                visible_button_keys,
+            )
+            self.assertNotIn(
+                f"retrieve_source_{self.nec_source_id}",
+                visible_button_keys,
+            )
+            self.assertNotIn(
+                "取得したNECページ",
+                "\n".join(self.html_bodies(app)),
+            )
+
+    def test_unsafe_url_failure_uses_safe_japanese_message(self) -> None:
+        with self.database_patches(), patch(
+            "careerlens.source_retrieval.retrieve_webpage",
+            side_effect=UnsafeSourceURLError("internal details"),
+        ):
+            app = AppTest.from_file(self.page_path).run()
+            app.selectbox(key="company_selector").select(self.nec_id).run()
+            app.button(key=f"retrieve_source_{self.nec_source_id}").click().run()
+
+            self.assertIn(
+                "このURLは安全上の理由から取得できません。",
+                [error.value for error in app.error],
+            )
+            self.assertNotIn(
+                "internal details",
+                [error.value for error in app.error],
+            )
+            self.assertFalse(app.expander)
+
+    def test_pdf_failure_explains_current_limitation(self) -> None:
+        with self.database_patches(), patch(
+            "careerlens.source_retrieval.retrieve_webpage",
+            side_effect=PDFSourceUnsupportedError("internal details"),
+        ):
+            app = AppTest.from_file(self.page_path).run()
+            app.selectbox(key="company_selector").select(self.nec_id).run()
+            app.button(key=f"retrieve_source_{self.nec_source_id}").click().run()
+
+            self.assertIn(
+                "PDFの本文取得は現在のバージョンでは未対応です。",
+                [error.value for error in app.error],
+            )
+            self.assertFalse(app.expander)
+
+
+if __name__ == "__main__":
+    unittest.main()

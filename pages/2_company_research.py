@@ -3,7 +3,8 @@
 import html
 import sqlite3
 from collections import Counter
-from datetime import date
+from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 
 import streamlit as st
 
@@ -19,6 +20,21 @@ from careerlens.database import (
     list_sources,
     update_company,
     update_source,
+)
+from careerlens.source_retrieval import (
+    EmptySourceContentError,
+    InvalidSourceURLError,
+    PDFSourceUnsupportedError,
+    SourceConnectionError,
+    SourceDNSResolutionError,
+    SourceHTTPStatusError,
+    SourceRedirectError,
+    SourceResponseTooLargeError,
+    SourceRetrievalError,
+    SourceTimeoutError,
+    UnsafeSourceURLError,
+    UnsupportedSourceContentTypeError,
+    retrieve_webpage,
 )
 
 
@@ -40,6 +56,9 @@ SOURCE_TYPES = (
     "ニュース",
     "その他",
 )
+
+JAPAN_TIME_ZONE = ZoneInfo("Asia/Tokyo")
+SOURCE_PREVIEW_CHARACTERS = 4_000
 
 
 def set_company_feedback(message: str, message_type: str = "success") -> None:
@@ -383,12 +402,14 @@ def render_delete_confirmation(company: dict[str, object]) -> None:
         st.rerun()
 
     if confirm_delete:
+        company_id = int(company["id"])
         try:
-            delete_company(int(company["id"]))
+            delete_company(company_id)
         except sqlite3.Error:
             st.error("企業情報を削除できませんでした。時間をおいて再度お試しください。")
             return
 
+        clear_company_retrievals(company_id)
         st.session_state["company_pending_selection"] = None
         st.session_state["company_mode"] = "view"
         st.session_state["source_mode"] = "view"
@@ -407,6 +428,64 @@ def show_source_feedback() -> None:
     feedback = st.session_state.pop("source_feedback", None)
     if feedback:
         st.success(feedback)
+
+
+def source_retrieval_key(company_id: int, source_id: int) -> str:
+    """Return a company-scoped key for one ephemeral retrieval result."""
+    return f"{company_id}:{source_id}"
+
+
+def clear_source_retrieval(company_id: int, source_id: int) -> None:
+    """Discard a session-only preview when its saved source changes."""
+    results = st.session_state.get("source_retrieval_results", {})
+    results.pop(source_retrieval_key(company_id, source_id), None)
+
+
+def clear_company_retrievals(company_id: int) -> None:
+    """Discard all session-only previews for a deleted company."""
+    results = st.session_state.get("source_retrieval_results", {})
+    company_prefix = f"{company_id}:"
+    for result_key in list(results):
+        if result_key.startswith(company_prefix):
+            results.pop(result_key, None)
+
+
+def format_retrieval_timestamp(value: object) -> str:
+    """Format a stored UTC-aware retrieval timestamp in Japan time."""
+    try:
+        timestamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        return timestamp.astimezone(JAPAN_TIME_ZONE).strftime("%Y/%m/%d %H:%M JST")
+    except ValueError:
+        return "取得時刻不明"
+
+
+def source_retrieval_error_message(error: SourceRetrievalError) -> str:
+    """Map retrieval failures to concise messages without exposing internals."""
+    if isinstance(error, InvalidSourceURLError):
+        return "URLの形式を確認してください。"
+    if isinstance(error, UnsafeSourceURLError):
+        return "このURLは安全上の理由から取得できません。"
+    if isinstance(error, SourceDNSResolutionError):
+        return "URLのホスト名を確認できないため、ページを取得できませんでした。"
+    if isinstance(error, SourceTimeoutError):
+        return "ページの応答に時間がかかりすぎました。"
+    if isinstance(error, SourceConnectionError):
+        return "ページの取得に失敗しました。URLと接続状況を確認してください。"
+    if isinstance(error, SourceHTTPStatusError):
+        return f"ページの取得に失敗しました（HTTP {error.status_code}）。"
+    if isinstance(error, SourceRedirectError):
+        return "ページのリダイレクト先を安全に確認できませんでした。"
+    if isinstance(error, SourceResponseTooLargeError):
+        return "ページのサイズが上限を超えているため取得できません。"
+    if isinstance(error, PDFSourceUnsupportedError):
+        return "PDFの本文取得は現在のバージョンでは未対応です。"
+    if isinstance(error, UnsupportedSourceContentTypeError):
+        return "このコンテンツ形式の本文取得には対応していません。"
+    if isinstance(error, EmptySourceContentError):
+        return "取得したページから有効な本文を抽出できませんでした。"
+    return "ページの取得に失敗しました。"
 
 
 def source_validation_message(error: ValueError) -> str:
@@ -522,6 +601,7 @@ def render_source_form(
                 publication_date_text,
                 notes,
             )
+            clear_source_retrieval(company_id, source_id)
             message = "情報源を更新しました。"
         else:
             create_source(
@@ -549,13 +629,101 @@ def render_source_form(
     st.rerun()
 
 
-def render_source_card(source: dict[str, object]) -> None:
+def render_retrieved_source_preview(
+    source: dict[str, object],
+    result: dict[str, object],
+) -> None:
+    """Render session-only source text as retrieved, not verified, evidence."""
+    source_id = int(source["id"])
+    safe_title = html.escape(str(result.get("title") or source["title"]))
+    safe_source_url = html.escape(str(result["source_url"]))
+    safe_final_url = html.escape(str(result["final_url"]))
+    safe_content_type = html.escape(str(result["content_type"]))
+    timestamp = html.escape(format_retrieval_timestamp(result["retrieved_at"]))
+    character_count = int(result["character_count"])
+    final_url_html = ""
+    if result["final_url"] != result["source_url"]:
+        final_url_html = (
+            '<div class="source-retrieval-url">'
+            f"最終URL：{safe_final_url}</div>"
+        )
+
+    st.html(
+        f"""
+        <section class="source-retrieval-panel">
+            <div class="source-retrieval-label">WEBPAGE CONTENT — RETRIEVED</div>
+            <h4>URL先の公開ページから取得した本文</h4>
+            <p class="source-retrieval-title">{safe_title}</p>
+            <div class="source-retrieval-url">取得元：{safe_source_url}</div>
+            {final_url_html}
+            <div class="source-retrieval-details">
+                <span>{timestamp}</span>
+                <span>{safe_content_type}</span>
+                <span>{character_count:,}文字</span>
+            </div>
+            <p class="source-retrieval-note">
+                取得した情報源本文のプレビューです。内容が検証済みであることや、
+                最新であることを意味しません。
+            </p>
+        </section>
+        """
+    )
+
+    text = str(result["text"])
+    preview = text[:SOURCE_PREVIEW_CHARACTERS]
+    with st.expander("取得本文をプレビュー"):
+        st.code(preview, language=None, wrap_lines=True)
+        if len(text) > SOURCE_PREVIEW_CHARACTERS:
+            st.caption(
+                f"プレビューは先頭{SOURCE_PREVIEW_CHARACTERS:,}文字です。"
+                f"取得本文は全{character_count:,}文字です。"
+            )
+        if bool(result.get("truncated")):
+            st.warning("安全上の上限により、取得本文の一部のみを表示しています。")
+
+
+def retrieve_source_for_preview(company_id: int, source_id: int) -> None:
+    """Retrieve one owned source after an explicit user action."""
+    result_key = source_retrieval_key(company_id, source_id)
+    st.session_state["source_retrieval_results"].pop(result_key, None)
+
+    try:
+        owned_source = get_source(source_id, company_id)
+    except sqlite3.Error:
+        st.error("情報源を確認できないため、ページを取得できませんでした。")
+        return
+
+    if owned_source is None:
+        st.error("この企業に属する情報源が見つかりません。")
+        return
+
+    try:
+        with st.spinner("公開ページの本文を取得しています…"):
+            result = retrieve_webpage(str(owned_source["url"]))
+    except SourceRetrievalError as error:
+        st.error(source_retrieval_error_message(error))
+        return
+    except Exception:
+        st.error("ページの取得に失敗しました。")
+        return
+
+    st.session_state["source_retrieval_results"][result_key] = result
+    set_source_feedback("ページ本文を取得しました。")
+    st.rerun()
+
+
+def render_source_card(source: dict[str, object], company_id: int) -> None:
     """Render a compact evidence-reference card and its explicit actions."""
     safe_type = html.escape(str(source["source_type"]))
     safe_title = html.escape(str(source["title"]))
     safe_url = html.escape(str(source["url"]))
     publication_date = source["publication_date"]
     notes = str(source["notes"]).strip()
+    source_id = int(source["id"])
+    result_key = source_retrieval_key(company_id, source_id)
+    retrieval_result = st.session_state["source_retrieval_results"].get(result_key)
+    retrieval_status = "本文取得済み" if retrieval_result else "本文未取得"
+    retrieval_status_class = " is-retrieved" if retrieval_result else ""
 
     date_html = (
         f'<span class="source-date">公開日 {html.escape(str(publication_date))}</span>'
@@ -575,6 +743,9 @@ def render_source_card(source: dict[str, object]) -> None:
                 <div class="source-meta">
                     <span class="source-type">{safe_type}</span>
                     {date_html}
+                    <span class="source-content-status{retrieval_status_class}">
+                        {retrieval_status}
+                    </span>
                 </div>
                 <h3>{safe_title}</h3>
                 <div class="source-url">{safe_url}</div>
@@ -583,14 +754,25 @@ def render_source_card(source: dict[str, object]) -> None:
             """
         )
 
-        source_id = int(source["id"])
-        link_column, edit_column, delete_column = st.columns([1.8, 1, 1])
+        link_column, retrieve_column, edit_column, delete_column = st.columns(
+            [1.7, 1.25, 0.9, 0.9]
+        )
         with link_column:
             st.link_button(
                 "元のURLを開く",
                 str(source["url"]),
                 use_container_width=True,
             )
+        with retrieve_column:
+            if st.button(
+                "本文を取得",
+                use_container_width=True,
+                key=f"retrieve_source_{source_id}",
+            ):
+                retrieve_source_for_preview(company_id, source_id)
+                retrieval_result = st.session_state[
+                    "source_retrieval_results"
+                ].get(result_key)
         with edit_column:
             if st.button(
                 "編集",
@@ -609,6 +791,9 @@ def render_source_card(source: dict[str, object]) -> None:
                 st.session_state["active_source_id"] = source_id
                 st.session_state["source_mode"] = "delete"
                 st.rerun()
+
+        if retrieval_result:
+            render_retrieved_source_preview(source, retrieval_result)
 
 
 def render_source_delete_confirmation(
@@ -655,6 +840,7 @@ def render_source_delete_confirmation(
             st.error("情報源を削除できませんでした。時間をおいて再度お試しください。")
             return
 
+        clear_source_retrieval(company_id, source_id)
         st.session_state["source_mode"] = "view"
         st.session_state.pop("active_source_id", None)
         set_source_feedback("情報源を削除しました。")
@@ -710,7 +896,7 @@ def render_sources_section(company_id: int) -> None:
             return
 
         for source in sources:
-            render_source_card(source)
+            render_source_card(source, company_id)
         return
 
     if source_mode == "create":
@@ -1103,6 +1289,23 @@ st.html(
             font-size: 0.76rem;
         }
 
+        .source-content-status {
+            display: inline-flex;
+            padding: 0.24rem 0.62rem;
+            background: #f4f6f8;
+            border: 1px solid var(--cl-border);
+            border-radius: 999px;
+            color: var(--cl-muted);
+            font-size: 0.74rem;
+            font-weight: 700;
+        }
+
+        .source-content-status.is-retrieved {
+            background: #eef7f4;
+            border-color: #d4e9e1;
+            color: #2d6b58;
+        }
+
         .source-card-content h3 {
             margin: 0.8rem 0 0;
             color: var(--cl-navy);
@@ -1126,6 +1329,61 @@ st.html(
             color: var(--cl-slate);
             font-size: 0.86rem;
             line-height: 1.65;
+        }
+
+        .source-retrieval-panel {
+            margin-top: 1.15rem;
+            padding: 1.2rem 1.3rem;
+            background: #f8fafc;
+            border: 1px solid var(--cl-border);
+            border-left: 3px solid var(--cl-blue);
+            border-radius: 10px;
+        }
+
+        .source-retrieval-label {
+            color: var(--cl-blue);
+            font-size: 0.7rem;
+            font-weight: 800;
+            letter-spacing: 0.09em;
+        }
+
+        .source-retrieval-panel h4 {
+            margin: 0.35rem 0 0;
+            color: var(--cl-navy);
+            font-size: 1rem;
+            font-weight: 720;
+        }
+
+        .source-retrieval-title {
+            margin: 0.75rem 0 0;
+            color: var(--cl-navy);
+            font-size: 0.9rem;
+            font-weight: 700;
+        }
+
+        .source-retrieval-url {
+            margin-top: 0.32rem;
+            color: var(--cl-muted);
+            font-size: 0.75rem;
+            line-height: 1.5;
+            overflow-wrap: anywhere;
+        }
+
+        .source-retrieval-details {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem 1rem;
+            margin-top: 0.8rem;
+            color: var(--cl-slate);
+            font-size: 0.76rem;
+            font-weight: 650;
+        }
+
+        .source-retrieval-note {
+            margin: 0.75rem 0 0;
+            color: var(--cl-muted);
+            font-size: 0.78rem;
+            line-height: 1.6;
         }
 
         .sources-empty-state {
@@ -1186,6 +1444,7 @@ initialize_database()
 st.session_state.setdefault("company_mode", "view")
 st.session_state.setdefault("source_mode", "view")
 st.session_state.setdefault("company_create_form_version", 0)
+st.session_state.setdefault("source_retrieval_results", {})
 
 st.html(
     """
