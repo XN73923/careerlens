@@ -1092,6 +1092,59 @@ class AIResultDatabaseTests(unittest.TestCase):
             [other_id],
         )
 
+    def test_evidence_result_preserves_snapshot_provenance_and_company_isolation(
+        self,
+    ) -> None:
+        generated_content = {
+            "version": "0.2",
+            "model": "test-model",
+            "selected_source_ids": [10],
+            "selected_snapshot_ids": [21],
+            "selected_evidence_provenance": [
+                {
+                    "source_id": 10,
+                    "snapshot_id": 21,
+                    "source_title": "NEC公式サイト",
+                    "original_url": "https://example.com/nec",
+                    "final_url": "https://www.example.com/nec",
+                    "source_type": "企業公式サイト",
+                    "retrieved_at": "2026-08-28T04:39:00+00:00",
+                    "content_type": "text/html",
+                    "truncated": True,
+                    "input_text_truncated": False,
+                }
+            ],
+            "source_bodies_retrieved": True,
+            "generated_result": {"research_fields": {}},
+        }
+
+        result_id = create_ai_result(
+            self.first_company_id,
+            "research_assistant_evidence_v0_2",
+            generated_content,
+            self.database_path,
+        )
+
+        saved = get_ai_result(result_id, self.database_path)
+        provenance = saved["generated_content"]["selected_evidence_provenance"][0]
+        self.assertEqual(saved["result_type"], "research_assistant_evidence_v0_2")
+        self.assertEqual(saved["generated_content"]["selected_snapshot_ids"], [21])
+        self.assertEqual(provenance["source_id"], 10)
+        self.assertEqual(provenance["snapshot_id"], 21)
+        self.assertEqual(
+            provenance["retrieved_at"],
+            "2026-08-28T04:39:00+00:00",
+        )
+        self.assertTrue(provenance["truncated"])
+        self.assertEqual(
+            list_ai_results(
+                self.second_company_id,
+                "research_assistant_evidence_v0_2",
+                self.database_path,
+            ),
+            [],
+        )
+
     def test_result_type_filter_returns_only_requested_type(self) -> None:
         assistant_id = create_ai_result(
             self.first_company_id,

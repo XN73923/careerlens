@@ -1,4 +1,4 @@
-"""Source-metadata-aware Research Assistant for CareerLens v0.1."""
+"""User-selected evidence-backed Research Assistant for CareerLens v0.2."""
 
 import html
 import sqlite3
@@ -9,13 +9,16 @@ import streamlit as st
 
 from careerlens.ai_service import (
     AIRequestError,
+    EVIDENCE_RESEARCH_ASSISTANT_VERSION,
+    EVIDENCE_RESEARCH_RESULT_TYPE,
     InsufficientQuotaError,
     InvalidAIResponseError,
+    InvalidEvidenceSelectionError,
     MissingAPIKeyError,
-    RESEARCH_ASSISTANT_VERSION,
     RESEARCH_RESULT_TYPE,
+    build_evidence_research_input,
     load_api_configuration,
-    run_research_analysis,
+    run_evidence_research_analysis,
 )
 from careerlens.database import (
     create_ai_result,
@@ -24,6 +27,7 @@ from careerlens.database import (
     initialize_database,
     list_ai_results,
     list_companies,
+    list_source_contents,
     list_sources,
 )
 
@@ -37,6 +41,9 @@ COMPANY_FIELD_LABELS = (
     ("roles_work", "職種・仕事内容"),
     ("free_notes", "自由メモ"),
 )
+
+EVIDENCE_FIELD_LABELS = COMPANY_FIELD_LABELS[:-1]
+EVIDENCE_PREVIEW_CHARACTERS = 1_200
 
 JAPAN_TIME_ZONE = ZoneInfo("Asia/Tokyo")
 
@@ -96,8 +103,12 @@ def render_company_snapshot(company: dict[str, object]) -> None:
     )
 
 
-def render_source_selector(source: dict[str, object], company_id: int) -> bool:
-    """Render one metadata-only source and return its explicit selection state."""
+def render_evidence_selector(
+    source: dict[str, object],
+    snapshots: list[dict[str, object]],
+    company_id: int,
+) -> dict[str, object] | None:
+    """Render one Source and return only an explicitly selected Snapshot."""
     publication_date = source["publication_date"]
     date_html = (
         f'<span>公開日 {html.escape(str(publication_date))}</span>'
@@ -109,6 +120,38 @@ def render_source_selector(source: dict[str, object], company_id: int) -> bool:
         f'<p>{html.escape(notes).replace(chr(10), "<br>")}</p>' if notes else ""
     )
 
+    if not snapshots:
+        with st.container(border=True):
+            st.html(
+                f"""
+                <article class="assistant-source-card">
+                    <div class="assistant-source-meta">
+                        <span class="assistant-source-type">
+                            {html.escape(str(source['source_type']))}
+                        </span>
+                        {date_html}
+                        <strong>本文未取得</strong>
+                    </div>
+                    <h3>{html.escape(str(source['title']))}</h3>
+                    <div class="assistant-source-url">
+                        {html.escape(str(source['url']))}
+                    </div>
+                    {notes_html}
+                </article>
+                """
+            )
+            st.caption(
+                "取得済み本文がないため、AIの事実根拠として選択できません。"
+            )
+        return None
+
+    snapshot_by_id = {int(snapshot["id"]): snapshot for snapshot in snapshots}
+
+    def format_snapshot_option(snapshot_id: int) -> str:
+        snapshot = snapshot_by_id[snapshot_id]
+        timestamp = format_japan_timestamp(snapshot["retrieved_at"])
+        return f"Snapshot #{snapshot_id} · {timestamp}"
+
     with st.container(border=True):
         st.html(
             f"""
@@ -118,7 +161,7 @@ def render_source_selector(source: dict[str, object], company_id: int) -> bool:
                         {html.escape(str(source['source_type']))}
                     </span>
                     {date_html}
-                    <strong>本文未取得</strong>
+                    <strong class="is-retrieved">取得済み本文</strong>
                 </div>
                 <h3>{html.escape(str(source['title']))}</h3>
                 <div class="assistant-source-url">
@@ -128,11 +171,58 @@ def render_source_selector(source: dict[str, object], company_id: int) -> bool:
             </article>
             """
         )
-        return st.checkbox(
-            "この情報源をAI入力に含める",
-            value=False,
-            key=f"assistant_source_{company_id}_{source['id']}",
+
+        selected_snapshot_id = st.selectbox(
+            "使用する取得Snapshot",
+            options=list(snapshot_by_id),
+            format_func=format_snapshot_option,
+            key=f"assistant_snapshot_{company_id}_{source['id']}",
         )
+        selected_snapshot = snapshot_by_id[int(selected_snapshot_id)]
+        source_url = str(selected_snapshot.get("source_url") or source["url"])
+        final_url = str(selected_snapshot.get("final_url") or source["url"])
+        truncated_label = (
+            "取得時に一部省略あり"
+            if bool(selected_snapshot.get("truncated"))
+            else "取得時の省略なし"
+        )
+        st.html(
+            f"""
+            <section class="assistant-evidence-meta">
+                <div class="assistant-content-label">RETRIEVED EVIDENCE</div>
+                <div class="assistant-evidence-grid">
+                    <span>Snapshot #{int(selected_snapshot['id'])}</span>
+                    <span>{html.escape(format_japan_timestamp(selected_snapshot['retrieved_at']))}</span>
+                    <span>{int(selected_snapshot['character_count']):,}文字</span>
+                    <span>{html.escape(str(selected_snapshot.get('content_type') or '不明'))}</span>
+                    <span>{html.escape(truncated_label)}</span>
+                </div>
+                <div class="assistant-source-url">取得元URL：{html.escape(source_url)}</div>
+                <div class="assistant-source-url">最終URL：{html.escape(final_url)}</div>
+            </section>
+            """
+        )
+        preview = str(selected_snapshot["retrieved_text"])[
+            :EVIDENCE_PREVIEW_CHARACTERS
+        ]
+        with st.expander("取得済み本文のプレビュー"):
+            st.code(preview, language=None, wrap_lines=True)
+            if int(selected_snapshot["character_count"]) > len(preview):
+                st.caption(
+                    f"プレビューは先頭{EVIDENCE_PREVIEW_CHARACTERS:,}文字です。"
+                )
+
+        selected = st.checkbox(
+            "この取得本文をAIの根拠として使用する",
+            value=False,
+            key=(
+                f"assistant_evidence_{company_id}_{source['id']}_"
+                f"{selected_snapshot_id}"
+            ),
+        )
+        if selected:
+            return {"source": source, "snapshot": selected_snapshot}
+        return None
 
 
 def render_string_list(items: list[object], empty_copy: str) -> None:
@@ -142,6 +232,93 @@ def render_string_list(items: list[object], empty_copy: str) -> None:
         return
     for item in items:
         st.markdown(f"- {str(item)}")
+
+
+def render_evidence_result(
+    content: dict[str, object],
+    result: dict[str, object],
+) -> None:
+    """Render validated v0.2 fields with exact Snapshot provenance."""
+    provenance_items = content.get("selected_evidence_provenance", [])
+    provenance_by_snapshot = {
+        int(item["snapshot_id"]): item
+        for item in provenance_items
+        if isinstance(item, dict) and "snapshot_id" in item
+    }
+
+    st.caption(
+        "選択した取得本文に基づくAI整理です。検証済み・最新であることを意味しません。"
+    )
+    st.subheader("企業研究フィールド")
+    research_fields = result.get("research_fields", {})
+    if not isinstance(research_fields, dict):
+        st.warning("企業研究フィールドを表示できません。")
+        return
+
+    for field_name, label in EVIDENCE_FIELD_LABELS:
+        field_result = research_fields.get(field_name, {})
+        if not isinstance(field_result, dict):
+            continue
+        with st.container(border=True):
+            st.markdown(f"**{label}**")
+            st.write(str(field_result.get("summary", "")))
+
+            if field_result.get("status") == "supported":
+                st.caption("根拠 — 選択した取得済み本文")
+                for evidence in field_result.get("evidence", []):
+                    if not isinstance(evidence, dict):
+                        continue
+                    snapshot_id = int(evidence["snapshot_id"])
+                    provenance = provenance_by_snapshot.get(snapshot_id, {})
+                    timestamp = format_japan_timestamp(
+                        provenance.get("retrieved_at", "不明")
+                    )
+                    st.markdown(
+                        f"**{evidence['source_title']}**  ·  "
+                        f"Source #{int(evidence['source_id'])}  ·  "
+                        f"Snapshot #{snapshot_id}  ·  取得日時 {timestamp}"
+                    )
+                    limitation_labels = []
+                    if provenance.get("truncated"):
+                        limitation_labels.append("取得本文に省略あり")
+                    if provenance.get("input_text_truncated"):
+                        limitation_labels.append("AI入力用本文に省略あり")
+                    if limitation_labels:
+                        st.caption(" / ".join(limitation_labels))
+                    st.code(
+                        str(evidence["supporting_excerpt"]),
+                        language=None,
+                        wrap_lines=True,
+                    )
+            else:
+                st.caption("選択した取得本文内に十分な根拠がない項目です。")
+
+    st.subheader("ユーザー入力メモ")
+    user_notes = result.get("user_notes", {})
+    if isinstance(user_notes, dict) and user_notes.get("summary"):
+        st.write(str(user_notes["summary"]))
+    else:
+        st.caption("整理できるユーザー入力メモはありません。")
+
+    st.subheader("不足している情報")
+    gaps = result.get("information_gaps", [])
+    if gaps:
+        for gap in gaps:
+            st.markdown(f"**{gap['topic']}** — {gap['reason']}")
+    else:
+        st.caption("不足情報は挙げられていません。")
+
+    st.subheader("次に確認したい質問")
+    render_string_list(
+        result.get("research_questions", []),
+        "次の調査質問は挙げられていません。",
+    )
+
+    st.subheader("制約")
+    render_string_list(
+        result.get("limitations", []),
+        "制約情報は挙げられていません。",
+    )
 
 
 def render_ai_result_record(
@@ -158,14 +335,17 @@ def render_ai_result_record(
     if not isinstance(result, dict):
         st.warning("保存されたAI結果の形式を確認できません。")
         return
+    is_evidence_result = "research_fields" in result
 
     if show_header:
         generated_at = format_japan_timestamp(record.get("created_at", "未保存"))
         st.html(
             f"""
             <section class="assistant-result-header">
-                <div class="assistant-ai-label">AI-GENERATED</div>
-                <h2>研究状況の整理結果</h2>
+                <div class="assistant-ai-label">
+                    AI-GENERATED{' · EVIDENCE-BACKED' if is_evidence_result else ''}
+                </div>
+                <h2>{'取得済み本文に基づく企業研究' if is_evidence_result else '研究状況の整理結果'}</h2>
                 <div class="assistant-result-meta">
                     <span>生成日時 {html.escape(generated_at)}</span>
                     <span>使用モデル {html.escape(str(content.get('model', '不明')))}</span>
@@ -173,6 +353,14 @@ def render_ai_result_record(
             </section>
             """
         )
+
+    if is_evidence_result:
+        render_evidence_result(content, result)
+        st.caption(
+            "この結果はCompany Researchを自動更新しません。"
+            "内容を確認し、事実確認と最終判断はユーザー自身で行ってください。"
+        )
+        return
 
     st.subheader("現在の情報整理")
     summary = result.get("user_note_summary", {})
@@ -394,6 +582,10 @@ st.html(
             border-radius: 999px;
             color: var(--cl-slate);
         }
+        .assistant-source-meta strong.is-retrieved {
+            background: #eef7f4;
+            color: #2d6b58;
+        }
         .assistant-source-type {
             padding: 0.22rem 0.6rem;
             background: var(--cl-blue-soft);
@@ -419,6 +611,22 @@ st.html(
             color: var(--cl-slate);
             font-size: 0.84rem;
             line-height: 1.65;
+        }
+        .assistant-evidence-meta {
+            margin-top: 0.9rem;
+            padding: 0.9rem 1rem;
+            background: #f8fafc;
+            border: 1px solid var(--cl-border);
+            border-left: 3px solid var(--cl-blue);
+            border-radius: 9px;
+        }
+        .assistant-evidence-grid {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.35rem 1rem;
+            margin-top: 0.45rem;
+            color: var(--cl-slate);
+            font-size: 0.75rem;
         }
         [data-testid="stBaseButton-primary"] {
             min-height: 2.7rem;
@@ -483,8 +691,8 @@ st.html(
         AIは調査を支援しますが、事実確認と最終判断はユーザーが行います。
     </div>
     <div class="assistant-limitation">
-        <strong>このバージョンではURL先の本文はまだ取得していません。</strong><br>
-        情報源のタイトル・URL・種類・メモのみを参照します。
+        <strong>AIは、ユーザーが明示的に選択した取得済み本文だけを事実根拠として使用します。</strong><br>
+        取得本文にない会社情報は補完せず、不足している根拠として表示します。
     </div>
     """
 )
@@ -527,10 +735,16 @@ if selected_company_id is None:
 try:
     selected_company = get_company(int(selected_company_id))
     company_sources = list_sources(int(selected_company_id))
-    recent_results = list_ai_results(
-        int(selected_company_id),
-        RESEARCH_RESULT_TYPE,
-    )
+    source_contents = {
+        int(source["id"]): list_source_contents(int(source["id"]))
+        for source in company_sources
+    }
+    recent_results = [
+        result
+        for result in list_ai_results(int(selected_company_id))
+        if result["result_type"]
+        in {RESEARCH_RESULT_TYPE, EVIDENCE_RESEARCH_RESULT_TYPE}
+    ]
 except sqlite3.Error:
     st.error("Research Assistantの情報を読み込めませんでした。")
     st.stop()
@@ -544,23 +758,28 @@ render_company_snapshot(selected_company)
 st.html(
     """
     <div class="assistant-section-header">
-        <div class="assistant-section-label">SELECT SOURCE METADATA</div>
-        <h2>AI入力に含める情報源</h2>
+        <div class="assistant-section-label">SELECT RETRIEVED EVIDENCE</div>
+        <h2>AIの根拠にする取得済み本文</h2>
         <p>
-            使用する情報源を明示的に選択してください。URL先の本文は送信せず、
-            表示されているメタデータだけを使用します。
+            Sourceごとに使用するSnapshotを選び、根拠として使用する本文だけを
+            明示的にチェックしてください。未選択の本文はAIへ送信されません。
         </p>
     </div>
     """
 )
 
-selected_sources = []
+selected_evidence = []
 if company_sources:
     for source in company_sources:
-        if render_source_selector(source, int(selected_company_id)):
-            selected_sources.append(source)
+        selection = render_evidence_selector(
+            source,
+            source_contents[int(source["id"])],
+            int(selected_company_id),
+        )
+        if selection:
+            selected_evidence.append(selection)
 else:
-    st.caption("この企業に保存された情報源はありません。ユーザー入力だけで整理できます。")
+    st.caption("この企業に保存された情報源はありません。")
 
 api_key, configured_model = load_api_configuration()
 if not api_key:
@@ -569,44 +788,89 @@ if not api_key:
         "AI機能を利用するにはローカル環境でAPIキーを設定してください。"
     )
 
+input_preview = None
+if selected_evidence:
+    try:
+        input_preview = build_evidence_research_input(
+            selected_company,
+            selected_evidence,
+        )
+    except InvalidEvidenceSelectionError:
+        st.error("選択した取得済み本文の所有関係を確認できませんでした。")
+    else:
+        input_truncated_count = sum(
+            bool(item["retrieved_content"]["input_text_truncated"])
+            for item in input_preview["selected_retrieved_evidence"]
+        )
+        if input_truncated_count:
+            st.warning(
+                f"選択したSnapshotのうち{input_truncated_count}件は、"
+                "入力上限に合わせてAI送信時の本文を先頭から省略します。"
+                "省略状態はAI入力と保存結果に記録されます。"
+            )
+
 st.caption(
-    f"選択中の情報源: {len(selected_sources)}件（すべて本文未取得） / "
+    f"選択中の取得済み本文: {len(selected_evidence)}件 / "
     f"使用予定モデル: {configured_model}"
 )
+if not selected_evidence:
+    st.caption("AIを実行するには、取得済み本文を1件以上明示的に選択してください。")
 
 run_analysis = st.button(
-    "AIで研究状況を整理",
+    "取得済み本文をもとにAIで企業研究を整理",
     type="primary",
-    disabled=not bool(api_key),
+    disabled=not bool(api_key) or not bool(input_preview),
     key=f"run_research_assistant_{selected_company_id}",
 )
 
 if run_analysis:
     try:
-        with st.spinner("ユーザー入力と選択した情報源メタデータを整理しています…"):
-            analysis = run_research_analysis(
+        with st.spinner("選択した取得済み本文とユーザー入力を整理しています…"):
+            analysis = run_evidence_research_analysis(
                 selected_company,
-                selected_sources,
+                selected_evidence,
                 api_key=api_key,
                 model=configured_model,
             )
+        selected_input_evidence = analysis["input"][
+            "selected_retrieved_evidence"
+        ]
+        evidence_provenance = [
+            {
+                "source_id": int(item["source_metadata"]["source_id"]),
+                "snapshot_id": int(item["retrieved_content"]["snapshot_id"]),
+                "source_title": item["source_metadata"]["title"],
+                "original_url": item["source_metadata"]["original_url"],
+                "final_url": item["retrieved_content"]["final_url"],
+                "source_type": item["source_metadata"]["source_type"],
+                "retrieved_at": item["retrieved_content"]["retrieved_at"],
+                "content_type": item["retrieved_content"]["content_type"],
+                "truncated": bool(item["retrieved_content"]["truncated"]),
+                "input_text_truncated": bool(
+                    item["retrieved_content"]["input_text_truncated"]
+                ),
+            }
+            for item in selected_input_evidence
+        ]
         generated_content = {
-            "version": RESEARCH_ASSISTANT_VERSION,
+            "version": EVIDENCE_RESEARCH_ASSISTANT_VERSION,
             "model": analysis["model"],
-            "selected_source_ids": [
-                int(source["id"]) for source in selected_sources
+            "selected_source_ids": list(
+                dict.fromkeys(
+                    item["source_id"] for item in evidence_provenance
+                )
+            ),
+            "selected_snapshot_ids": [
+                item["snapshot_id"] for item in evidence_provenance
             ],
-            "selected_source_metadata": analysis["input"][
-                "selected_source_metadata"
-            ],
-            "source_bodies_retrieved": False,
-            "source_limitation": "保存されたURLの本文は取得していません。",
+            "selected_evidence_provenance": evidence_provenance,
+            "source_bodies_retrieved": True,
             "generated_result": analysis["result"],
         }
         try:
             result_id = create_ai_result(
                 int(selected_company_id),
-                RESEARCH_RESULT_TYPE,
+                EVIDENCE_RESEARCH_RESULT_TYPE,
                 generated_content,
             )
         except sqlite3.Error:
@@ -621,6 +885,8 @@ if run_analysis:
             st.rerun()
     except MissingAPIKeyError:
         st.error("OpenAI APIキーが設定されていません。")
+    except InvalidEvidenceSelectionError:
+        st.error("選択した取得済み本文をAIの根拠として使用できませんでした。")
     except InsufficientQuotaError:
         st.error(
             "OpenAI APIの利用可能なクレジットがありません。"

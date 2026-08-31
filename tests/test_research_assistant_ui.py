@@ -9,6 +9,41 @@ from streamlit.testing.v1 import AppTest
 
 import careerlens.ai_service as ai_service
 import careerlens.database as database
+from careerlens.prompts import INSUFFICIENT_EVIDENCE_MESSAGE
+
+
+def evidence_result(source_id: int, snapshot_id: int) -> dict[str, object]:
+    """Return a compact valid v0.2 result for UI tests."""
+    insufficient = {
+        "status": "insufficient",
+        "summary": INSUFFICIENT_EVIDENCE_MESSAGE,
+        "evidence": [],
+    }
+    return {
+        "research_fields": {
+            "main_business": dict(insufficient),
+            "strengths": dict(insufficient),
+            "strategy": dict(insufficient),
+            "dx_ai_initiatives": {
+                "status": "supported",
+                "summary": "AIの社会実装に関する記載があります。",
+                "evidence": [
+                    {
+                        "source_id": source_id,
+                        "snapshot_id": snapshot_id,
+                        "source_title": "NEC公式サイト",
+                        "supporting_excerpt": "AIを社会に実装します。",
+                    }
+                ],
+            },
+            "overseas_business": dict(insufficient),
+            "roles_work": dict(insufficient),
+        },
+        "user_notes": {"summary": "ユーザー入力ではITサービスを記録しています。"},
+        "information_gaps": [],
+        "research_questions": ["海外事業の展開地域はどこか？"],
+        "limitations": ["選択したSnapshotは取得時に一部省略されています。"],
+    }
 
 
 class ResearchAssistantUiTests(unittest.TestCase):
@@ -42,6 +77,42 @@ class ResearchAssistantUiTests(unittest.TestCase):
             "企業公式サイト",
             database_path=self.database_path,
         )
+        self.nec_snapshot_id = database.create_source_content(
+            self.nec_source_id,
+            "https://example.com/nec",
+            "https://www.example.com/nec",
+            "NEC公式サイト",
+            "text/html",
+            "BluStellar\nAIを社会に実装します。",
+            29,
+            True,
+            "2026-08-28T04:39:00+00:00",
+            self.database_path,
+        )
+        self.nec_old_snapshot_id = database.create_source_content(
+            self.nec_source_id,
+            "https://example.com/nec",
+            "https://www.example.com/nec",
+            "NEC公式サイト",
+            "text/html",
+            "以前に取得したNEC本文",
+            11,
+            False,
+            "2026-08-27T04:39:00+00:00",
+            self.database_path,
+        )
+        self.bank_snapshot_id = database.create_source_content(
+            self.bank_source_id,
+            "https://example.com/bank",
+            "https://www.example.com/bank",
+            "横浜銀行公式サイト",
+            "text/html",
+            "横浜銀行だけの取得本文",
+            11,
+            False,
+            "2026-08-28T05:00:00+00:00",
+            self.database_path,
+        )
 
     def tearDown(self) -> None:
         self.temporary_directory.cleanup()
@@ -52,6 +123,7 @@ class ResearchAssistantUiTests(unittest.TestCase):
         list_companies = database.list_companies
         get_company = database.get_company
         list_sources = database.list_sources
+        list_source_contents = database.list_source_contents
         list_ai_results = database.list_ai_results
         get_ai_result = database.get_ai_result
         create_ai_result = database.create_ai_result
@@ -63,6 +135,10 @@ class ResearchAssistantUiTests(unittest.TestCase):
             list_companies=lambda: list_companies(database_path),
             get_company=lambda company_id: get_company(company_id, database_path),
             list_sources=lambda company_id: list_sources(company_id, database_path),
+            list_source_contents=lambda source_id: list_source_contents(
+                source_id,
+                database_path,
+            ),
             list_ai_results=lambda company_id, result_type=None: list_ai_results(
                 company_id, result_type, database_path
             ),
@@ -99,7 +175,7 @@ class ResearchAssistantUiTests(unittest.TestCase):
             ),
             patch.object(
                 ai_service,
-                "run_research_analysis",
+                "run_evidence_research_analysis",
                 side_effect=fail_if_ai_runs,
             ),
         ):
@@ -114,24 +190,26 @@ class ResearchAssistantUiTests(unittest.TestCase):
             )
             self.assertIn("OpenAI APIキーが設定されていません", app.info[0].value)
             checkbox_keys = {checkbox.key for checkbox in app.checkbox}
+            nec_checkbox_key = (
+                f"assistant_evidence_{self.nec_id}_{self.nec_source_id}_"
+                f"{self.nec_snapshot_id}"
+            )
             self.assertIn(
-                f"assistant_source_{self.nec_id}_{self.nec_source_id}",
+                nec_checkbox_key,
                 checkbox_keys,
             )
             self.assertNotIn(
-                f"assistant_source_{self.bank_id}_{self.bank_source_id}",
+                f"assistant_evidence_{self.bank_id}_{self.bank_source_id}_"
+                f"{self.bank_snapshot_id}",
                 checkbox_keys,
             )
-            app.checkbox(
-                key=f"assistant_source_{self.nec_id}_{self.nec_source_id}"
-            ).check().run()
+            app.checkbox(key=nec_checkbox_key).check().run()
+            self.assertTrue(app.checkbox(key=nec_checkbox_key).value)
             self.assertTrue(
-                app.checkbox(
-                    key=f"assistant_source_{self.nec_id}_{self.nec_source_id}"
-                ).value
-            )
-            self.assertTrue(
-                any("選択中の情報源: 1件" in caption.value for caption in app.caption)
+                any(
+                    "選択中の取得済み本文: 1件" in caption.value
+                    for caption in app.caption
+                )
             )
             self.assertEqual(ai_calls, [])
 
@@ -140,63 +218,34 @@ class ResearchAssistantUiTests(unittest.TestCase):
             ).run()
             checkbox_keys = {checkbox.key for checkbox in app.checkbox}
             self.assertIn(
-                f"assistant_source_{self.bank_id}_{self.bank_source_id}",
+                f"assistant_evidence_{self.bank_id}_{self.bank_source_id}_"
+                f"{self.bank_snapshot_id}",
                 checkbox_keys,
             )
             self.assertNotIn(
-                f"assistant_source_{self.nec_id}_{self.nec_source_id}",
+                nec_checkbox_key,
                 checkbox_keys,
             )
             self.assertEqual(ai_calls, [])
 
     def test_configured_key_still_requires_button_before_one_ai_call(self) -> None:
         ai_calls: list[dict[str, object]] = []
-        result = {
-            "user_note_summary": {
-                "main_business": "ITサービス",
-                "strengths": None,
-                "strategy": None,
-                "dx_ai_initiatives": None,
-                "overseas_business": None,
-                "roles_work": None,
-                "free_notes": None,
-            },
-            "source_map": [
-                {
-                    "source_id": self.nec_source_id,
-                    "title": "NEC公式サイト",
-                    "source_type": "企業公式サイト",
-                    "likely_research_use": ["事業領域を追加確認する手がかり"],
-                    "status": "metadata_only",
-                }
-            ],
-            "information_gaps": [],
-            "research_questions": ["主な顧客領域は何か？"],
-            "limitations": ["保存されたURLの本文は取得していません。"],
-        }
+        result = evidence_result(self.nec_source_id, self.nec_snapshot_id)
 
-        def fake_analysis(company, selected_sources, **kwargs):
+        def fake_analysis(company, selected_evidence, **kwargs):
             ai_calls.append(
                 {
                     "company": company,
-                    "selected_sources": selected_sources,
+                    "selected_evidence": selected_evidence,
                     "kwargs": kwargs,
                 }
             )
             return {
                 "model": "test-model",
-                "input": {
-                    "selected_source_metadata": [
-                        {
-                            "id": self.nec_source_id,
-                            "title": "NEC公式サイト",
-                            "url": "https://example.com/nec",
-                            "source_type": "企業公式サイト",
-                            "publication_date": None,
-                            "notes": "",
-                        }
-                    ]
-                },
+                "input": ai_service.build_evidence_research_input(
+                    company,
+                    selected_evidence,
+                ),
                 "result": result,
             }
 
@@ -209,7 +258,7 @@ class ResearchAssistantUiTests(unittest.TestCase):
             ),
             patch.object(
                 ai_service,
-                "run_research_analysis",
+                "run_evidence_research_analysis",
                 side_effect=fake_analysis,
             ),
         ):
@@ -217,28 +266,55 @@ class ResearchAssistantUiTests(unittest.TestCase):
             app.selectbox(key="research_assistant_company").select(
                 self.nec_id
             ).run()
-            app.checkbox(
-                key=f"assistant_source_{self.nec_id}_{self.nec_source_id}"
-            ).check().run()
+            evidence_checkbox_key = (
+                f"assistant_evidence_{self.nec_id}_{self.nec_source_id}_"
+                f"{self.nec_snapshot_id}"
+            )
+            app.checkbox(key=evidence_checkbox_key).check().run()
 
             self.assertEqual(ai_calls, [])
             app.button(key=f"run_research_assistant_{self.nec_id}").click().run()
 
             self.assertEqual(len(ai_calls), 1)
             self.assertEqual(
-                [source["id"] for source in ai_calls[0]["selected_sources"]],
-                [self.nec_source_id],
+                [
+                    item["snapshot"]["id"]
+                    for item in ai_calls[0]["selected_evidence"]
+                ],
+                [self.nec_snapshot_id],
             )
             saved_results = database.list_ai_results(
                 self.nec_id,
-                ai_service.RESEARCH_RESULT_TYPE,
+                ai_service.EVIDENCE_RESEARCH_RESULT_TYPE,
             )
             self.assertEqual(len(saved_results), 1)
             stored_content = saved_results[0]["generated_content"]
-            self.assertFalse(stored_content["source_bodies_retrieved"])
+            self.assertTrue(stored_content["source_bodies_retrieved"])
             self.assertEqual(
                 stored_content["selected_source_ids"],
                 [self.nec_source_id],
+            )
+            self.assertEqual(
+                stored_content["selected_snapshot_ids"],
+                [self.nec_snapshot_id],
+            )
+            provenance = stored_content["selected_evidence_provenance"][0]
+            self.assertEqual(provenance["snapshot_id"], self.nec_snapshot_id)
+            self.assertEqual(
+                provenance["retrieved_at"],
+                "2026-08-28T04:39:00+00:00",
+            )
+            self.assertTrue(provenance["truncated"])
+            self.assertEqual(
+                database.list_ai_results(
+                    self.bank_id,
+                    ai_service.EVIDENCE_RESEARCH_RESULT_TYPE,
+                ),
+                [],
+            )
+            self.assertEqual(
+                database.get_company(self.nec_id)["dx_ai_initiatives"],
+                "",
             )
 
             connection = database.get_connection(self.database_path)
@@ -254,6 +330,7 @@ class ResearchAssistantUiTests(unittest.TestCase):
 
             html_values = [element.proto.body for element in app.get("html")]
             self.assertTrue(any("AI-GENERATED" in value for value in html_values))
+            self.assertTrue(any("EVIDENCE-BACKED" in value for value in html_values))
             self.assertTrue(
                 any("生成日時 2026-08-28 13:39 JST" in value for value in html_values)
             )
@@ -261,6 +338,79 @@ class ResearchAssistantUiTests(unittest.TestCase):
                 any(
                     "2026-08-28 13:39 JST" in expander.label
                     for expander in app.expander
+                )
+            )
+            self.assertTrue(
+                any(
+                    code.value == "AIを社会に実装します。"
+                    for code in app.code
+                )
+            )
+
+    def test_user_can_choose_historical_snapshot_and_must_select_it_explicitly(
+        self,
+    ) -> None:
+        with (
+            self.database_patches(),
+            patch.object(
+                ai_service,
+                "load_api_configuration",
+                return_value=(None, "test-model"),
+            ),
+        ):
+            app = AppTest.from_file(self.page_path()).run()
+            app.selectbox(key="research_assistant_company").select(
+                self.nec_id
+            ).run()
+
+            snapshot_selector = app.selectbox(
+                key=f"assistant_snapshot_{self.nec_id}_{self.nec_source_id}"
+            )
+            self.assertEqual(snapshot_selector.value, self.nec_snapshot_id)
+            snapshot_selector.select(self.nec_old_snapshot_id).run()
+
+            old_checkbox_key = (
+                f"assistant_evidence_{self.nec_id}_{self.nec_source_id}_"
+                f"{self.nec_old_snapshot_id}"
+            )
+            checkbox_keys = {checkbox.key for checkbox in app.checkbox}
+            self.assertIn(old_checkbox_key, checkbox_keys)
+            self.assertNotIn(
+                f"assistant_evidence_{self.nec_id}_{self.nec_source_id}_"
+                f"{self.nec_snapshot_id}",
+                checkbox_keys,
+            )
+            self.assertFalse(app.checkbox(key=old_checkbox_key).value)
+
+    def test_source_without_snapshot_cannot_be_selected_as_evidence(self) -> None:
+        metadata_only_source_id = database.create_source(
+            self.nec_id,
+            "本文未取得の資料",
+            "https://example.com/no-content",
+            "その他",
+            database_path=self.database_path,
+        )
+
+        with (
+            self.database_patches(),
+            patch.object(
+                ai_service,
+                "load_api_configuration",
+                return_value=(None, "test-model"),
+            ),
+        ):
+            app = AppTest.from_file(self.page_path()).run()
+            app.selectbox(key="research_assistant_company").select(
+                self.nec_id
+            ).run()
+
+            html_values = [element.proto.body for element in app.get("html")]
+            self.assertTrue(any("本文未取得の資料" in value for value in html_values))
+            self.assertTrue(any("本文未取得" in value for value in html_values))
+            self.assertFalse(
+                any(
+                    f"_{metadata_only_source_id}_" in str(checkbox.key)
+                    for checkbox in app.checkbox
                 )
             )
 
@@ -277,7 +427,7 @@ class ResearchAssistantUiTests(unittest.TestCase):
             ),
             patch.object(
                 ai_service,
-                "run_research_analysis",
+                "run_evidence_research_analysis",
                 side_effect=raise_insufficient_quota,
             ),
         ):
@@ -285,6 +435,12 @@ class ResearchAssistantUiTests(unittest.TestCase):
             app.selectbox(key="research_assistant_company").select(
                 self.nec_id
             ).run()
+            app.checkbox(
+                key=(
+                    f"assistant_evidence_{self.nec_id}_{self.nec_source_id}_"
+                    f"{self.nec_snapshot_id}"
+                )
+            ).check().run()
             app.button(key=f"run_research_assistant_{self.nec_id}").click().run()
 
             self.assertEqual(len(app.error), 1)
@@ -292,6 +448,64 @@ class ResearchAssistantUiTests(unittest.TestCase):
                 app.error[0].value,
                 "OpenAI APIの利用可能なクレジットがありません。"
                 "OpenAI PlatformのBilling設定を確認してください。",
+            )
+
+    def test_metadata_only_history_remains_readable(self) -> None:
+        legacy_content = {
+            "version": "0.1",
+            "model": "legacy-model",
+            "selected_source_ids": [self.nec_source_id],
+            "selected_source_metadata": [],
+            "source_bodies_retrieved": False,
+            "generated_result": {
+                "user_note_summary": {
+                    "main_business": "ITサービス",
+                    "strengths": None,
+                    "strategy": None,
+                    "dx_ai_initiatives": None,
+                    "overseas_business": None,
+                    "roles_work": None,
+                    "free_notes": None,
+                },
+                "source_map": [
+                    {
+                        "source_id": self.nec_source_id,
+                        "title": "NEC公式サイト",
+                        "source_type": "企業公式サイト",
+                        "likely_research_use": ["追加確認"],
+                        "status": "metadata_only",
+                    }
+                ],
+                "information_gaps": [],
+                "research_questions": [],
+                "limitations": ["本文未取得"],
+            },
+        }
+        database.create_ai_result(
+            self.nec_id,
+            ai_service.RESEARCH_RESULT_TYPE,
+            legacy_content,
+            self.database_path,
+        )
+
+        with (
+            self.database_patches(),
+            patch.object(
+                ai_service,
+                "load_api_configuration",
+                return_value=(None, "test-model"),
+            ),
+        ):
+            app = AppTest.from_file(self.page_path()).run()
+            app.selectbox(key="research_assistant_company").select(
+                self.nec_id
+            ).run()
+
+            self.assertTrue(
+                any("v0.1" in expander.label for expander in app.expander)
+            )
+            self.assertTrue(
+                any("本文未取得" in markdown.value for markdown in app.markdown)
             )
 
 
