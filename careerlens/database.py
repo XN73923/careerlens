@@ -10,6 +10,17 @@ from urllib.parse import urlsplit
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATABASE_PATH = PROJECT_ROOT / "data" / "careerlens.db"
 
+ADOPTABLE_COMPANY_FIELDS = frozenset(
+    {
+        "main_business",
+        "strengths",
+        "strategy",
+        "dx_ai_initiatives",
+        "overseas_business",
+        "roles_work",
+    }
+)
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS user_profile (
@@ -758,6 +769,38 @@ def update_company(
             WHERE id = ?
             """,
             (*normalized_fields, company_id),
+        )
+        if cursor.rowcount != 1:
+            raise sqlite3.DatabaseError("The company was not found.")
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def update_company_field(
+    company_id: int,
+    field_name: str,
+    value: str,
+    database_path: str | Path = DATABASE_PATH,
+) -> None:
+    """Update one explicitly allowed Company Research field."""
+    if (
+        not isinstance(field_name, str)
+        or field_name not in ADOPTABLE_COMPANY_FIELDS
+    ):
+        raise ValueError("The company field is not adoptable.")
+    if not isinstance(value, str):
+        raise ValueError("The company field value must be text.")
+
+    connection = get_connection(database_path)
+    try:
+        cursor = connection.execute(
+            f"""
+            UPDATE companies
+            SET {field_name} = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (value, company_id),
         )
         if cursor.rowcount != 1:
             raise sqlite3.DatabaseError("The company was not found.")

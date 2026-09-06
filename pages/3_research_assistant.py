@@ -14,6 +14,7 @@ from careerlens.ai_service import (
     InsufficientQuotaError,
     InvalidAIResponseError,
     InvalidEvidenceSelectionError,
+    MAX_EVIDENCE_EXCERPT_CHARACTERS,
     MissingAPIKeyError,
     RESEARCH_RESULT_TYPE,
     build_evidence_research_input,
@@ -29,6 +30,7 @@ from careerlens.database import (
     list_companies,
     list_source_contents,
     list_sources,
+    update_company_field,
 )
 
 
@@ -234,17 +236,232 @@ def render_string_list(items: list[object], empty_copy: str) -> None:
         st.markdown(f"- {str(item)}")
 
 
+def field_has_valid_evidence(
+    field_result: dict[str, object],
+    provenance_by_snapshot: dict[int, dict[str, object]],
+    snapshots_by_id: dict[int, dict[str, object]],
+) -> bool:
+    """Return whether a supported field still has traceable exact evidence."""
+    if field_result.get("status") != "supported":
+        return False
+
+    summary = field_result.get("summary")
+    evidence_items = field_result.get("evidence")
+    if not isinstance(summary, str) or not summary.strip():
+        return False
+    if not isinstance(evidence_items, list) or not evidence_items:
+        return False
+
+    for evidence in evidence_items:
+        if not isinstance(evidence, dict):
+            return False
+        try:
+            source_id = int(evidence["source_id"])
+            snapshot_id = int(evidence["snapshot_id"])
+            source_title = str(evidence["source_title"])
+            excerpt = evidence["supporting_excerpt"]
+        except (KeyError, TypeError, ValueError):
+            return False
+        if not isinstance(excerpt, str) or not excerpt:
+            return False
+        if len(excerpt) > MAX_EVIDENCE_EXCERPT_CHARACTERS:
+            return False
+
+        provenance = provenance_by_snapshot.get(snapshot_id)
+        snapshot = snapshots_by_id.get(snapshot_id)
+        if provenance is None or snapshot is None:
+            return False
+        try:
+            provenance_source_id = int(provenance["source_id"])
+            snapshot_source_id = int(snapshot["source_id"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        if provenance_source_id != source_id or snapshot_source_id != source_id:
+            return False
+        if str(provenance.get("source_title", "")) != source_title:
+            return False
+        if str(provenance.get("retrieved_at", "")) != str(
+            snapshot.get("retrieved_at", "")
+        ):
+            return False
+        if excerpt not in str(snapshot.get("retrieved_text", "")):
+            return False
+
+    return True
+
+
+def save_adopted_company_field(
+    company_id: int,
+    field_name: str,
+    field_label: str,
+    value: str,
+    state_key: str,
+) -> None:
+    """Persist one user-approved field and refresh the displayed company."""
+    try:
+        update_company_field(company_id, field_name, value)
+    except (sqlite3.Error, ValueError):
+        st.error("Company Researchを更新できませんでした。時間をおいて再度お試しください。")
+        return
+
+    st.session_state.pop(state_key, None)
+    st.session_state["research_assistant_adoption_feedback"] = {
+        "company_id": company_id,
+        "message": f"Company Research の『{field_label}』を更新しました。",
+    }
+    st.rerun()
+
+
+def render_adoption_controls(
+    company: dict[str, object],
+    result_id: int | str,
+    field_name: str,
+    field_label: str,
+    proposal: str,
+) -> None:
+    """Render explicit adopt, edit, and decline actions for one field."""
+    company_id = int(company["id"])
+    current_value = str(company.get(field_name, "")).strip()
+    state_key = f"assistant_adoption_mode_{result_id}_{field_name}"
+    edit_key = f"assistant_adoption_edit_{result_id}_{field_name}"
+
+    st.markdown("**現在の企業情報**")
+    st.write(current_value or "未入力")
+    st.markdown("**AIによる提案**")
+    st.write(proposal)
+
+    adopt_column, edit_column, decline_column = st.columns(3)
+    adopt_clicked = adopt_column.button(
+        "この内容を採用",
+        type="primary",
+        key=f"assistant_adopt_{result_id}_{field_name}",
+        use_container_width=True,
+    )
+    edit_clicked = edit_column.button(
+        "編集して採用",
+        key=f"assistant_edit_adopt_{result_id}_{field_name}",
+        use_container_width=True,
+    )
+    decline_clicked = decline_column.button(
+        "採用しない",
+        key=f"assistant_decline_{result_id}_{field_name}",
+        use_container_width=True,
+    )
+
+    if adopt_clicked:
+        if current_value == proposal.strip():
+            st.session_state[state_key] = "unchanged"
+        elif current_value:
+            st.session_state[state_key] = "confirm_replace"
+        else:
+            save_adopted_company_field(
+                company_id,
+                field_name,
+                field_label,
+                proposal,
+                state_key,
+            )
+    if edit_clicked:
+        st.session_state[state_key] = "edit"
+        if edit_key not in st.session_state:
+            st.session_state[edit_key] = proposal
+    if decline_clicked:
+        st.session_state[state_key] = "declined"
+
+    mode = st.session_state.get(state_key)
+    if mode == "confirm_replace":
+        st.warning("既存の企業情報をAI提案で置き換えます。内容を確認してください。")
+        confirm_column, cancel_column = st.columns(2)
+        if confirm_column.button(
+            "置き換えて採用",
+            type="primary",
+            key=f"assistant_confirm_replace_{result_id}_{field_name}",
+            use_container_width=True,
+        ):
+            save_adopted_company_field(
+                company_id,
+                field_name,
+                field_label,
+                proposal,
+                state_key,
+            )
+        if cancel_column.button(
+            "キャンセル",
+            key=f"assistant_cancel_replace_{result_id}_{field_name}",
+            use_container_width=True,
+        ):
+            st.session_state.pop(state_key, None)
+    elif mode == "edit":
+        edited_value = st.text_area(
+            "採用する内容を編集",
+            key=edit_key,
+            height=130,
+        )
+        save_column, cancel_column = st.columns(2)
+        if save_column.button(
+            "編集内容を採用",
+            type="primary",
+            key=f"assistant_save_edited_{result_id}_{field_name}",
+            use_container_width=True,
+        ):
+            if edited_value.strip():
+                save_adopted_company_field(
+                    company_id,
+                    field_name,
+                    field_label,
+                    edited_value,
+                    state_key,
+                )
+            else:
+                st.error("採用する内容を入力してください。")
+        if cancel_column.button(
+            "キャンセル",
+            key=f"assistant_cancel_edit_{result_id}_{field_name}",
+            use_container_width=True,
+        ):
+            st.session_state.pop(state_key, None)
+    elif mode == "declined":
+        st.caption("この提案は企業情報に反映されません。")
+    elif mode == "unchanged":
+        st.info("現在の企業情報には、すでに同じ内容が保存されています。")
+
+
 def render_evidence_result(
     content: dict[str, object],
     result: dict[str, object],
+    *,
+    company: dict[str, object] | None = None,
+    result_id: int | str | None = None,
+    snapshots_by_id: dict[int, dict[str, object]] | None = None,
 ) -> None:
     """Render validated v0.2 fields with exact Snapshot provenance."""
     provenance_items = content.get("selected_evidence_provenance", [])
-    provenance_by_snapshot = {
-        int(item["snapshot_id"]): item
-        for item in provenance_items
-        if isinstance(item, dict) and "snapshot_id" in item
-    }
+    try:
+        selected_snapshot_ids = {
+            int(snapshot_id) for snapshot_id in content["selected_snapshot_ids"]
+        }
+        selected_source_ids = {
+            int(source_id) for source_id in content["selected_source_ids"]
+        }
+    except (KeyError, TypeError, ValueError):
+        selected_snapshot_ids = set()
+        selected_source_ids = set()
+
+    provenance_by_snapshot = {}
+    if isinstance(provenance_items, list):
+        for item in provenance_items:
+            if not isinstance(item, dict):
+                continue
+            try:
+                snapshot_id = int(item["snapshot_id"])
+                source_id = int(item["source_id"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if (
+                snapshot_id in selected_snapshot_ids
+                and source_id in selected_source_ids
+            ):
+                provenance_by_snapshot[snapshot_id] = item
 
     st.caption(
         "選択した取得本文に基づくAI整理です。検証済み・最新であることを意味しません。"
@@ -264,34 +481,54 @@ def render_evidence_result(
             st.write(str(field_result.get("summary", "")))
 
             if field_result.get("status") == "supported":
-                st.caption("根拠 — 選択した取得済み本文")
-                for evidence in field_result.get("evidence", []):
-                    if not isinstance(evidence, dict):
-                        continue
-                    snapshot_id = int(evidence["snapshot_id"])
-                    provenance = provenance_by_snapshot.get(snapshot_id, {})
-                    timestamp = format_japan_timestamp(
-                        provenance.get("retrieved_at", "不明")
-                    )
-                    st.markdown(
-                        f"**{evidence['source_title']}**  ·  "
-                        f"Source #{int(evidence['source_id'])}  ·  "
-                        f"Snapshot #{snapshot_id}  ·  取得日時 {timestamp}"
-                    )
-                    limitation_labels = []
-                    if provenance.get("truncated"):
-                        limitation_labels.append("取得本文に省略あり")
-                    if provenance.get("input_text_truncated"):
-                        limitation_labels.append("AI入力用本文に省略あり")
-                    if limitation_labels:
-                        st.caption(" / ".join(limitation_labels))
-                    st.code(
-                        str(evidence["supporting_excerpt"]),
-                        language=None,
-                        wrap_lines=True,
+                valid_evidence = field_has_valid_evidence(
+                    field_result,
+                    provenance_by_snapshot,
+                    snapshots_by_id or {},
+                )
+                if valid_evidence:
+                    st.caption("根拠 — 選択した取得済み本文")
+                    for evidence in field_result.get("evidence", []):
+                        snapshot_id = int(evidence["snapshot_id"])
+                        provenance = provenance_by_snapshot[snapshot_id]
+                        timestamp = format_japan_timestamp(
+                            provenance.get("retrieved_at", "不明")
+                        )
+                        st.markdown(
+                            f"**{evidence['source_title']}**  ·  "
+                            f"Source #{int(evidence['source_id'])}  ·  "
+                            f"Snapshot #{snapshot_id}  ·  取得日時 {timestamp}"
+                        )
+                        limitation_labels = []
+                        if provenance.get("truncated"):
+                            limitation_labels.append("取得本文に省略あり")
+                        if provenance.get("input_text_truncated"):
+                            limitation_labels.append("AI入力用本文に省略あり")
+                        if limitation_labels:
+                            st.caption(" / ".join(limitation_labels))
+                        st.code(
+                            str(evidence["supporting_excerpt"]),
+                            language=None,
+                            wrap_lines=True,
+                        )
+
+                    if company is None or result_id is None:
+                        st.caption("保存済みのAI結果のみCompany Researchへ反映できます。")
+                    else:
+                        render_adoption_controls(
+                            company,
+                            result_id,
+                            field_name,
+                            label,
+                            str(field_result.get("summary", "")),
+                        )
+                else:
+                    st.warning(
+                        "根拠を再確認できないため、企業情報には反映できません。"
                     )
             else:
                 st.caption("選択した取得本文内に十分な根拠がない項目です。")
+                st.caption("十分な根拠がないため、企業情報には反映できません。")
 
     st.subheader("ユーザー入力メモ")
     user_notes = result.get("user_notes", {})
@@ -325,6 +562,9 @@ def render_ai_result_record(
     record: dict[str, object],
     *,
     show_header: bool = True,
+    company: dict[str, object] | None = None,
+    snapshots_by_id: dict[int, dict[str, object]] | None = None,
+    control_key_prefix: str = "",
 ) -> None:
     """Render one stored or session-only AI result with clear provenance labels."""
     content = record.get("generated_content", {})
@@ -355,7 +595,23 @@ def render_ai_result_record(
         )
 
     if is_evidence_result:
-        render_evidence_result(content, result)
+        stored_evidence_result = (
+            record.get("result_type") == EVIDENCE_RESEARCH_RESULT_TYPE
+            and isinstance(record.get("id"), int)
+            and company is not None
+            and int(record.get("company_id", -1)) == int(company["id"])
+        )
+        render_evidence_result(
+            content,
+            result,
+            company=company if stored_evidence_result else None,
+            result_id=(
+                f"{control_key_prefix}{int(record['id'])}"
+                if stored_evidence_result
+                else None
+            ),
+            snapshots_by_id=snapshots_by_id,
+        )
         st.caption(
             "この結果はCompany Researchを自動更新しません。"
             "内容を確認し、事実確認と最終判断はユーザー自身で行ってください。"
@@ -739,6 +995,11 @@ try:
         int(source["id"]): list_source_contents(int(source["id"]))
         for source in company_sources
     }
+    snapshots_by_id = {
+        int(snapshot["id"]): snapshot
+        for snapshots in source_contents.values()
+        for snapshot in snapshots
+    }
     recent_results = [
         result
         for result in list_ai_results(int(selected_company_id))
@@ -752,6 +1013,14 @@ except sqlite3.Error:
 if selected_company is None:
     st.warning("選択した企業が見つかりません。")
     st.stop()
+
+adoption_feedback = st.session_state.get("research_assistant_adoption_feedback")
+if (
+    isinstance(adoption_feedback, dict)
+    and adoption_feedback.get("company_id") == int(selected_company_id)
+):
+    st.success(str(adoption_feedback.get("message", "")))
+    st.session_state.pop("research_assistant_adoption_feedback", None)
 
 render_company_snapshot(selected_company)
 
@@ -899,7 +1168,11 @@ if run_analysis:
 
 unsaved_result = st.session_state.get("research_assistant_unsaved_result")
 if unsaved_result:
-    render_ai_result_record(unsaved_result)
+    render_ai_result_record(
+        unsaved_result,
+        company=selected_company,
+        snapshots_by_id=snapshots_by_id,
+    )
 else:
     current_result_id = st.session_state.get(
         "research_assistant_current_result_id"
@@ -914,7 +1187,12 @@ else:
             current_result is not None
             and int(current_result["company_id"]) == int(selected_company_id)
         ):
-            render_ai_result_record(current_result)
+            render_ai_result_record(
+                current_result,
+                company=selected_company,
+                snapshots_by_id=snapshots_by_id,
+                control_key_prefix="current_",
+            )
 
 if recent_results:
     st.html(
@@ -936,4 +1214,9 @@ if recent_results:
         with st.expander(
             f"{generated_at} · {model} · v{version}"
         ):
-            render_ai_result_record(saved_result, show_header=False)
+            render_ai_result_record(
+                saved_result,
+                show_header=False,
+                company=selected_company,
+                snapshots_by_id=snapshots_by_id,
+            )

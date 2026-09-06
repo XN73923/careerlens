@@ -46,6 +46,32 @@ def evidence_result(source_id: int, snapshot_id: int) -> dict[str, object]:
     }
 
 
+def evidence_content(source_id: int, snapshot_id: int) -> dict[str, object]:
+    """Return one persisted evidence-backed result with traceable provenance."""
+    return {
+        "version": "0.2",
+        "model": "test-model",
+        "selected_source_ids": [source_id],
+        "selected_snapshot_ids": [snapshot_id],
+        "selected_evidence_provenance": [
+            {
+                "source_id": source_id,
+                "snapshot_id": snapshot_id,
+                "source_title": "NEC公式サイト",
+                "original_url": "https://example.com/nec",
+                "final_url": "https://www.example.com/nec",
+                "source_type": "企業公式サイト",
+                "retrieved_at": "2026-08-28T04:39:00+00:00",
+                "content_type": "text/html",
+                "truncated": True,
+                "input_text_truncated": False,
+            }
+        ],
+        "source_bodies_retrieved": True,
+        "generated_result": evidence_result(source_id, snapshot_id),
+    }
+
+
 class ResearchAssistantUiTests(unittest.TestCase):
     """Verify selection isolation and that no automatic AI request occurs."""
 
@@ -127,6 +153,7 @@ class ResearchAssistantUiTests(unittest.TestCase):
         list_ai_results = database.list_ai_results
         get_ai_result = database.get_ai_result
         create_ai_result = database.create_ai_result
+        update_company_field = database.update_company_field
         database_path = self.database_path
 
         return patch.multiple(
@@ -149,6 +176,14 @@ class ResearchAssistantUiTests(unittest.TestCase):
                 content,
                 database_path,
             ),
+            update_company_field=lambda company_id, field_name, value: (
+                update_company_field(
+                    company_id,
+                    field_name,
+                    value,
+                    database_path,
+                )
+            ),
         )
 
     @staticmethod
@@ -158,6 +193,17 @@ class ResearchAssistantUiTests(unittest.TestCase):
             / "pages"
             / "3_research_assistant.py"
         )
+
+    def create_evidence_result(self) -> tuple[int, dict[str, object]]:
+        """Persist one valid v0.2 result in the temporary database."""
+        content = evidence_content(self.nec_source_id, self.nec_snapshot_id)
+        result_id = database.create_ai_result(
+            self.nec_id,
+            ai_service.EVIDENCE_RESEARCH_RESULT_TYPE,
+            content,
+            self.database_path,
+        )
+        return result_id, content
 
     def test_missing_key_and_company_source_isolation_without_ai_call(self) -> None:
         ai_calls: list[object] = []
@@ -381,6 +427,236 @@ class ResearchAssistantUiTests(unittest.TestCase):
                 checkbox_keys,
             )
             self.assertFalse(app.checkbox(key=old_checkbox_key).value)
+
+    def test_supported_empty_field_can_be_adopted_without_ai_call(self) -> None:
+        result_id, original_content = self.create_evidence_result()
+        ai_calls: list[object] = []
+
+        def fail_if_ai_runs(*args, **kwargs):
+            ai_calls.append((args, kwargs))
+            raise AssertionError("Adoption must never run AI.")
+
+        with (
+            self.database_patches(),
+            patch.object(
+                ai_service,
+                "load_api_configuration",
+                return_value=(None, "test-model"),
+            ),
+            patch.object(
+                ai_service,
+                "run_evidence_research_analysis",
+                side_effect=fail_if_ai_runs,
+            ),
+        ):
+            app = AppTest.from_file(self.page_path()).run()
+            app.selectbox(key="research_assistant_company").select(
+                self.nec_id
+            ).run()
+
+            adopt_key = f"assistant_adopt_{result_id}_dx_ai_initiatives"
+            decline_key = f"assistant_decline_{result_id}_dx_ai_initiatives"
+            button_keys = {button.key for button in app.button}
+            self.assertIn(adopt_key, button_keys)
+            self.assertIn(decline_key, button_keys)
+            self.assertNotIn(
+                f"assistant_adopt_{result_id}_main_business",
+                button_keys,
+            )
+            app.button(key=decline_key).click().run()
+            self.assertEqual(
+                database.get_company(self.nec_id)["dx_ai_initiatives"],
+                "",
+            )
+            self.assertEqual(ai_calls, [])
+            app.button(key=adopt_key).click().run()
+
+            company = database.get_company(self.nec_id)
+            self.assertEqual(
+                company["dx_ai_initiatives"],
+                "AIの社会実装に関する記載があります。",
+            )
+            self.assertEqual(company["main_business"], "ITサービス")
+            self.assertEqual(ai_calls, [])
+            self.assertEqual(
+                database.get_ai_result(result_id)[
+                    "generated_content"
+                ],
+                original_content,
+            )
+            self.assertTrue(
+                any(
+                    "Company Research の『DX・AIの取り組み』を更新しました。"
+                    in message.value
+                    for message in app.success
+                )
+            )
+            html_values = [element.proto.body for element in app.get("html")]
+            self.assertTrue(
+                any("AIの社会実装に関する記載があります。" in value for value in html_values)
+            )
+
+    def test_non_empty_field_requires_explicit_replacement_confirmation(self) -> None:
+        database.update_company(
+            self.nec_id,
+            "NEC",
+            "ITサービス",
+            "",
+            "",
+            "生成AI関連の取り組みを調査中",
+            "",
+            "",
+            "",
+            self.database_path,
+        )
+        result_id, _ = self.create_evidence_result()
+
+        with (
+            self.database_patches(),
+            patch.object(
+                ai_service,
+                "load_api_configuration",
+                return_value=(None, "test-model"),
+            ),
+            patch.object(
+                ai_service,
+                "run_evidence_research_analysis",
+                side_effect=AssertionError("Adoption must never run AI."),
+            ),
+        ):
+            app = AppTest.from_file(self.page_path()).run()
+            app.selectbox(key="research_assistant_company").select(
+                self.nec_id
+            ).run()
+            app.button(
+                key=f"assistant_adopt_{result_id}_dx_ai_initiatives"
+            ).click().run()
+
+            self.assertEqual(
+                database.get_company(self.nec_id)[
+                    "dx_ai_initiatives"
+                ],
+                "生成AI関連の取り組みを調査中",
+            )
+            confirm_key = (
+                f"assistant_confirm_replace_{result_id}_dx_ai_initiatives"
+            )
+            self.assertIn(confirm_key, {button.key for button in app.button})
+
+            app.button(key=confirm_key).click().run()
+            self.assertEqual(
+                database.get_company(self.nec_id)[
+                    "dx_ai_initiatives"
+                ],
+                "AIの社会実装に関する記載があります。",
+            )
+
+    def test_edit_before_adoption_saves_only_the_edited_field(self) -> None:
+        result_id, _ = self.create_evidence_result()
+        ai_calls: list[object] = []
+
+        def fail_if_ai_runs(*args, **kwargs):
+            ai_calls.append((args, kwargs))
+            raise AssertionError("Adoption must never run AI.")
+
+        with (
+            self.database_patches(),
+            patch.object(
+                ai_service,
+                "load_api_configuration",
+                return_value=(None, "test-model"),
+            ),
+            patch.object(
+                ai_service,
+                "run_evidence_research_analysis",
+                side_effect=fail_if_ai_runs,
+            ),
+        ):
+            app = AppTest.from_file(self.page_path()).run()
+            app.selectbox(key="research_assistant_company").select(
+                self.nec_id
+            ).run()
+            app.button(
+                key=f"assistant_edit_adopt_{result_id}_dx_ai_initiatives"
+            ).click().run()
+
+            edit_key = f"assistant_adoption_edit_{result_id}_dx_ai_initiatives"
+            app.text_area(key=edit_key).set_value(
+                "面接で確認したい点を加えたユーザー編集版"
+            ).run()
+            app.button(
+                key=f"assistant_save_edited_{result_id}_dx_ai_initiatives"
+            ).click().run()
+
+            company = database.get_company(self.nec_id)
+            self.assertEqual(
+                company["dx_ai_initiatives"],
+                "面接で確認したい点を加えたユーザー編集版",
+            )
+            self.assertEqual(company["main_business"], "ITサービス")
+            self.assertEqual(company["free_notes"], "")
+            self.assertEqual(ai_calls, [])
+
+    def test_invalid_or_insufficient_evidence_is_not_adoptable(self) -> None:
+        content = evidence_content(self.nec_source_id, self.nec_snapshot_id)
+        content["generated_result"]["research_fields"]["dx_ai_initiatives"][
+            "evidence"
+        ][0]["supporting_excerpt"] = "Snapshot本文に存在しない引用"
+        result_id = database.create_ai_result(
+            self.nec_id,
+            ai_service.EVIDENCE_RESEARCH_RESULT_TYPE,
+            content,
+            self.database_path,
+        )
+
+        with (
+            self.database_patches(),
+            patch.object(
+                ai_service,
+                "load_api_configuration",
+                return_value=(None, "test-model"),
+            ),
+        ):
+            app = AppTest.from_file(self.page_path()).run()
+            app.selectbox(key="research_assistant_company").select(
+                self.nec_id
+            ).run()
+
+            button_keys = {button.key for button in app.button}
+            self.assertNotIn(
+                f"assistant_adopt_{result_id}_dx_ai_initiatives",
+                button_keys,
+            )
+            self.assertNotIn(
+                f"assistant_adopt_{result_id}_main_business",
+                button_keys,
+            )
+            self.assertFalse(
+                any(
+                    code.value == "Snapshot本文に存在しない引用"
+                    for code in app.code
+                )
+            )
+            self.assertTrue(
+                any(
+                    "根拠を再確認できないため、企業情報には反映できません。"
+                    in warning.value
+                    for warning in app.warning
+                )
+            )
+            self.assertTrue(
+                any(
+                    "十分な根拠がないため、企業情報には反映できません。"
+                    in caption.value
+                    for caption in app.caption
+                )
+            )
+            self.assertEqual(
+                database.get_company(self.nec_id)[
+                    "dx_ai_initiatives"
+                ],
+                "",
+            )
 
     def test_source_without_snapshot_cannot_be_selected_as_evidence(self) -> None:
         metadata_only_source_id = database.create_source(

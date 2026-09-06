@@ -36,6 +36,7 @@ from careerlens.database import (
     move_job_axis_down,
     move_job_axis_up,
     update_company,
+    update_company_field,
     update_experience,
     update_job_axis,
     update_source,
@@ -528,6 +529,66 @@ class CompanyDatabaseTests(unittest.TestCase):
         self.assertEqual(updated["free_notes"], "メモB")
         self.assertEqual(updated["created_at"], original["created_at"])
         self.assertNotEqual(updated["updated_at"], "2000-01-01 00:00:00")
+
+    def test_update_company_field_changes_only_one_allowed_field(self) -> None:
+        company_id = create_company(
+            "NEC",
+            "既存事業",
+            "既存の強み",
+            "既存戦略",
+            "調査中",
+            "既存海外情報",
+            "既存職種",
+            "保持するメモ",
+            self.database_path,
+        )
+        connection = get_connection(self.database_path)
+        try:
+            connection.execute(
+                "UPDATE companies SET updated_at = ? WHERE id = ?",
+                ("2000-01-01 00:00:00", company_id),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        update_company_field(
+            company_id,
+            "dx_ai_initiatives",
+            "BluStellarを通じたAI活用",
+            self.database_path,
+        )
+
+        company = get_company(company_id, self.database_path)
+        self.assertEqual(company["dx_ai_initiatives"], "BluStellarを通じたAI活用")
+        self.assertEqual(company["main_business"], "既存事業")
+        self.assertEqual(company["strengths"], "既存の強み")
+        self.assertEqual(company["strategy"], "既存戦略")
+        self.assertEqual(company["overseas_business"], "既存海外情報")
+        self.assertEqual(company["roles_work"], "既存職種")
+        self.assertEqual(company["free_notes"], "保持するメモ")
+        self.assertNotEqual(company["updated_at"], "2000-01-01 00:00:00")
+
+    def test_update_company_field_rejects_non_adoptable_fields(self) -> None:
+        company_id = create_company(
+            "NEC",
+            free_notes="変更禁止",
+            database_path=self.database_path,
+        )
+
+        for field_name in ("free_notes", "name", "created_at", "unknown"):
+            with self.subTest(field_name=field_name):
+                with self.assertRaises(ValueError):
+                    update_company_field(
+                        company_id,
+                        field_name,
+                        "上書き",
+                        self.database_path,
+                    )
+
+        company = get_company(company_id, self.database_path)
+        self.assertEqual(company["name"], "NEC")
+        self.assertEqual(company["free_notes"], "変更禁止")
 
     def test_delete_company_removes_only_requested_record(self) -> None:
         first_id = create_company("企業A", database_path=self.database_path)
