@@ -13,18 +13,25 @@ from careerlens.ai_service import (
     InsufficientQuotaError,
     InvalidAIResponseError,
     InvalidEvidenceSelectionError,
+    InvalidSelectionPreparationInputError,
     MAX_EVIDENCE_CHARACTERS_PER_SNAPSHOT,
     MissingAPIKeyError,
+    SELECTION_PREPARATION_RESULT_TYPE,
     build_evidence_research_input,
     build_research_input,
+    build_selection_preparation_input,
     run_evidence_research_analysis,
     run_research_analysis,
+    run_selection_preparation_analysis,
     validate_evidence_research_result,
+    validate_selection_preparation_result,
 )
 from careerlens.prompts import (
     EVIDENCE_RESEARCH_ASSISTANT_INSTRUCTIONS,
+    INSUFFICIENT_CONNECTION_MESSAGE,
     INSUFFICIENT_EVIDENCE_MESSAGE,
     RESEARCH_ASSISTANT_INSTRUCTIONS,
+    SELECTION_PREPARATION_INSTRUCTIONS,
 )
 
 
@@ -96,6 +103,55 @@ def valid_evidence_result() -> dict[str, object]:
         ],
         "research_questions": ["海外事業の展開地域はどこか？"],
         "limitations": ["選択したSnapshotは取得時に一部省略されています。"],
+    }
+
+
+def valid_selection_preparation_result() -> dict[str, object]:
+    """Return a valid Selection Preparation result for one axis and experience."""
+    return {
+        "company_axis_connections": [
+            {
+                "job_axis_id": 1,
+                "job_axis": "現場課題の解決",
+                "company_basis": "Company ResearchにDXによる課題解決の記録があります。",
+                "connection": "重視する観点との接点として整理できます。",
+                "status": "meaningful",
+            }
+        ],
+        "experience_connections": [
+            {
+                "experience_id": 3,
+                "experience_title": "物流インターン",
+                "company_basis": "Company ResearchにDXの取り組みがあります。",
+                "experience_basis": "物流課題への改善案を検討しました。",
+                "connection": "課題整理という観点で接点の可能性があります。",
+                "status": "weak",
+            }
+        ],
+        "combined_story_materials": [
+            {
+                "job_axis_id": 1,
+                "experience_id": 3,
+                "company_basis": "DXによる課題解決",
+                "job_axis_basis": "現場課題の解決を重視",
+                "experience_basis": "物流課題の改善案を検討",
+                "connection_interpretation": "課題を整理した姿勢に接点が考えられます。",
+                "points_to_explain": ["自分が担当した範囲を具体化する"],
+            }
+        ],
+        "interview_questions": [
+            {
+                "question": "改善案の中で自分が担当した部分はどこですか？",
+                "why_prepare": "入力では担当範囲が明確でないためです。",
+            }
+        ],
+        "information_gaps": [
+            {
+                "topic": "担当範囲",
+                "reason": "経験の詳細に担当範囲の記録がありません。",
+            }
+        ],
+        "limitations": ["入力済みの企業情報と選択項目だけを使用しています。"],
     }
 
 
@@ -630,6 +686,299 @@ class EvidenceAIServiceTests(unittest.TestCase):
         self.assertIn("完全一致文字列", prompt)
         self.assertIn("公式情報源であることだけを理由", prompt)
         self.assertIn("矛盾", prompt)
+
+
+class SelectionPreparationAIServiceTests(unittest.TestCase):
+    """Verify consent-scoped Selection Preparation input and output."""
+
+    def setUp(self) -> None:
+        self.company = {
+            "id": 10,
+            "name": "NEC",
+            "main_business": "ITサービス",
+            "strengths": "顧客基盤",
+            "strategy": "DX事業を強化",
+            "dx_ai_initiatives": "AIによる課題解決",
+            "overseas_business": "",
+            "roles_work": "SE",
+            "free_notes": "面接で確認する",
+            "target_roles": ["送信対象外"],
+            "sources": ["送信対象外"],
+            "old_ai_history": ["送信対象外"],
+            "another_company": "横浜銀行の情報は送信しない",
+        }
+        self.axis = {
+            "id": 1,
+            "criterion": "現場課題の解決",
+            "description": "DX・ITで業務課題を改善したい。",
+            "display_order": 1,
+            "updated_at": "送信対象外",
+        }
+        self.unselected_axis = {
+            "id": 2,
+            "criterion": "グローバル",
+            "description": "海外に関わりたい。",
+        }
+        self.experience = {
+            "id": 3,
+            "title": "物流インターン",
+            "category": "インターン",
+            "short_summary": "物流課題への改善案を検討。",
+            "details": "チームで課題を整理した。",
+            "skills_tags": ["課題整理", "チームワーク"],
+            "created_at": "送信対象外",
+        }
+        self.unselected_experience = {
+            "id": 4,
+            "title": "学園祭",
+            "category": "課外活動",
+            "short_summary": "イベントを運営。",
+            "details": "参加者情報を管理した。",
+            "skills_tags": ["運営"],
+        }
+
+    def build_input(self) -> dict[str, object]:
+        return build_selection_preparation_input(
+            self.company,
+            [self.axis],
+            [self.experience],
+        )
+
+    def test_input_contains_only_explicit_selections_and_allowed_fields(self) -> None:
+        preparation_input = self.build_input()
+
+        self.assertEqual(
+            set(preparation_input),
+            {"selected_company", "selected_job_axes", "selected_experiences"},
+        )
+        self.assertEqual(
+            set(preparation_input["selected_company"]),
+            {"name", "user_approved_company_research"},
+        )
+        self.assertEqual(
+            set(preparation_input["selected_company"]["user_approved_company_research"]),
+            {
+                "main_business",
+                "strengths",
+                "strategy",
+                "dx_ai_initiatives",
+                "overseas_business",
+                "roles_work",
+                "free_notes",
+            },
+        )
+        self.assertEqual(
+            preparation_input["selected_job_axes"],
+            [
+                {
+                    "id": 1,
+                    "criterion": "現場課題の解決",
+                    "description": "DX・ITで業務課題を改善したい。",
+                }
+            ],
+        )
+        self.assertEqual(
+            set(preparation_input["selected_experiences"][0]),
+            {
+                "id",
+                "title",
+                "category",
+                "short_summary",
+                "details",
+                "skills_tags",
+            },
+        )
+        serialized = json.dumps(preparation_input, ensure_ascii=False)
+        self.assertNotIn(self.unselected_axis["criterion"], serialized)
+        self.assertNotIn(self.unselected_experience["title"], serialized)
+        self.assertNotIn("横浜銀行", serialized)
+        self.assertNotIn("送信対象外", serialized)
+
+    def test_input_requires_each_selection_and_rejects_duplicates(self) -> None:
+        with self.assertRaises(InvalidSelectionPreparationInputError):
+            build_selection_preparation_input(self.company, [], [self.experience])
+        with self.assertRaises(InvalidSelectionPreparationInputError):
+            build_selection_preparation_input(self.company, [self.axis], [])
+        with self.assertRaises(InvalidSelectionPreparationInputError):
+            build_selection_preparation_input(
+                self.company,
+                [self.axis, self.axis],
+                [self.experience],
+            )
+        with self.assertRaises(InvalidSelectionPreparationInputError):
+            build_selection_preparation_input(
+                self.company,
+                [self.axis],
+                [self.experience, self.experience],
+            )
+
+    def test_structured_result_accepts_meaningful_weak_and_insufficient(self) -> None:
+        preparation_input = self.build_input()
+        validated = validate_selection_preparation_result(
+            valid_selection_preparation_result(),
+            preparation_input,
+        )
+        self.assertEqual(
+            validated["company_axis_connections"][0]["status"],
+            "meaningful",
+        )
+        self.assertEqual(
+            validated["experience_connections"][0]["status"],
+            "weak",
+        )
+
+        insufficient = valid_selection_preparation_result()
+        insufficient["company_axis_connections"][0].update(
+            status="insufficient",
+            connection=INSUFFICIENT_CONNECTION_MESSAGE,
+        )
+        insufficient["experience_connections"][0].update(
+            status="insufficient",
+            connection=INSUFFICIENT_CONNECTION_MESSAGE,
+        )
+        insufficient["combined_story_materials"] = []
+        validated = validate_selection_preparation_result(
+            insufficient,
+            preparation_input,
+        )
+        self.assertEqual(
+            validated["company_axis_connections"][0]["connection"],
+            INSUFFICIENT_CONNECTION_MESSAGE,
+        )
+
+    def test_result_cannot_reference_unselected_or_renamed_items(self) -> None:
+        preparation_input = self.build_input()
+        unselected_axis = valid_selection_preparation_result()
+        unselected_axis["company_axis_connections"][0]["job_axis_id"] = 999
+        with self.assertRaises(InvalidAIResponseError):
+            validate_selection_preparation_result(unselected_axis, preparation_input)
+
+        renamed_experience = valid_selection_preparation_result()
+        renamed_experience["experience_connections"][0][
+            "experience_title"
+        ] = "作られた経験"
+        with self.assertRaises(InvalidAIResponseError):
+            validate_selection_preparation_result(
+                renamed_experience,
+                preparation_input,
+            )
+
+        unsafe_insufficient = valid_selection_preparation_result()
+        unsafe_insufficient["experience_connections"][0].update(
+            status="insufficient",
+            connection="接点があります。",
+        )
+        with self.assertRaises(InvalidAIResponseError):
+            validate_selection_preparation_result(
+                unsafe_insufficient,
+                preparation_input,
+            )
+
+    def test_service_makes_one_stateless_structured_request(self) -> None:
+        fake_responses = FakeResponses(output=valid_selection_preparation_result())
+
+        analysis = run_selection_preparation_analysis(
+            self.company,
+            [self.axis],
+            [self.experience],
+            api_key="test-key-not-real",
+            model="test-model",
+            client=FakeClient(fake_responses),
+        )
+
+        self.assertEqual(len(fake_responses.calls), 1)
+        request = fake_responses.calls[0]
+        self.assertEqual(request["model"], "test-model")
+        self.assertFalse(request["store"])
+        self.assertNotIn("tools", request)
+        self.assertTrue(request["text"]["format"]["strict"])
+        self.assertEqual(
+            request["text"]["format"]["name"],
+            "careerlens_selection_preparation_v0_1",
+        )
+        sent_input = json.loads(request["input"])
+        self.assertEqual([axis["id"] for axis in sent_input["selected_job_axes"]], [1])
+        self.assertEqual(
+            [experience["id"] for experience in sent_input["selected_experiences"]],
+            [3],
+        )
+        self.assertEqual(analysis["result"], valid_selection_preparation_result())
+        self.assertEqual(SELECTION_PREPARATION_RESULT_TYPE, "selection_preparation_v0_1")
+
+    def test_service_errors_are_mapped_without_real_requests(self) -> None:
+        missing_key_responses = FakeResponses(
+            output=valid_selection_preparation_result()
+        )
+        with self.assertRaises(MissingAPIKeyError):
+            run_selection_preparation_analysis(
+                self.company,
+                [self.axis],
+                [self.experience],
+                api_key="",
+                client=FakeClient(missing_key_responses),
+            )
+        self.assertEqual(missing_key_responses.calls, [])
+
+        malformed_responses = FakeResponses(output="not json")
+        with self.assertRaises(InvalidAIResponseError):
+            run_selection_preparation_analysis(
+                self.company,
+                [self.axis],
+                [self.experience],
+                api_key="test-key-not-real",
+                client=FakeClient(malformed_responses),
+            )
+
+        invalid_responses = FakeResponses(output={"unexpected": "value"})
+        with self.assertRaises(InvalidAIResponseError):
+            run_selection_preparation_analysis(
+                self.company,
+                [self.axis],
+                [self.experience],
+                api_key="test-key-not-real",
+                client=FakeClient(invalid_responses),
+            )
+
+        generic_error_responses = FakeResponses(error=RuntimeError("network failed"))
+        with self.assertRaises(AIRequestError):
+            run_selection_preparation_analysis(
+                self.company,
+                [self.axis],
+                [self.experience],
+                api_key="test-key-not-real",
+                client=FakeClient(generic_error_responses),
+            )
+
+        request = httpx.Request("POST", "https://api.openai.com/v1/responses")
+        response = httpx.Response(429, request=request)
+        quota_error = RateLimitError(
+            "Insufficient quota",
+            response=response,
+            body={
+                "code": "credit_balance_exhausted",
+                "type": "insufficient_quota",
+            },
+        )
+        quota_responses = FakeResponses(error=quota_error)
+        with self.assertRaises(InsufficientQuotaError):
+            run_selection_preparation_analysis(
+                self.company,
+                [self.axis],
+                [self.experience],
+                api_key="test-key-not-real",
+                client=FakeClient(quota_responses),
+            )
+
+    def test_prompt_prohibits_fabrication_scores_ranking_and_final_answers(self) -> None:
+        prompt = SELECTION_PREPARATION_INSTRUCTIONS
+
+        self.assertIn("入力にない会社情報を作らない", prompt)
+        self.assertIn("入力にない出来事、役割、成果、数値、スキル、動機", prompt)
+        self.assertIn(INSUFFICIENT_CONNECTION_MESSAGE, prompt)
+        self.assertIn("fit score", prompt)
+        self.assertIn("企業ランキング、経験ランキング", prompt)
+        self.assertIn("完成した志望動機、ES回答、面接回答スクリプト", prompt)
+        self.assertIn("この経験が最も適しています", prompt)
 
 
 if __name__ == "__main__":

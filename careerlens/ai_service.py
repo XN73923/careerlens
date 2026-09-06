@@ -11,8 +11,11 @@ from careerlens.prompts import (
     EVIDENCE_RESEARCH_ASSISTANT_INSTRUCTIONS,
     EVIDENCE_RESEARCH_RESULT_SCHEMA,
     INSUFFICIENT_EVIDENCE_MESSAGE,
+    INSUFFICIENT_CONNECTION_MESSAGE,
     RESEARCH_ASSISTANT_INSTRUCTIONS,
     RESEARCH_RESULT_SCHEMA,
+    SELECTION_PREPARATION_INSTRUCTIONS,
+    SELECTION_PREPARATION_RESULT_SCHEMA,
 )
 
 
@@ -21,6 +24,8 @@ RESEARCH_ASSISTANT_VERSION = "0.1"
 RESEARCH_RESULT_TYPE = "research_assistant_v0_1"
 EVIDENCE_RESEARCH_ASSISTANT_VERSION = "0.2"
 EVIDENCE_RESEARCH_RESULT_TYPE = "research_assistant_evidence_v0_2"
+SELECTION_PREPARATION_VERSION = "0.1"
+SELECTION_PREPARATION_RESULT_TYPE = "selection_preparation_v0_1"
 MAX_TOTAL_EVIDENCE_CHARACTERS = 60_000
 MAX_EVIDENCE_CHARACTERS_PER_SNAPSHOT = 20_000
 MAX_EVIDENCE_EXCERPT_CHARACTERS = 400
@@ -69,6 +74,10 @@ class InvalidAIResponseError(AIServiceError):
 
 class InvalidEvidenceSelectionError(AIServiceError):
     """Raised when selected evidence is empty or crosses ownership boundaries."""
+
+
+class InvalidSelectionPreparationInputError(AIServiceError):
+    """Raised when required Selection Preparation input is missing or invalid."""
 
 
 def load_api_configuration() -> tuple[str | None, str]:
@@ -559,5 +568,377 @@ def run_evidence_research_analysis(
         "result": validate_evidence_research_result(
             parsed_result,
             research_input,
+        ),
+    }
+
+
+def build_selection_preparation_input(
+    company: dict[str, object],
+    selected_job_axes: list[dict[str, object]],
+    selected_experiences: list[dict[str, object]],
+) -> dict[str, object]:
+    """Build the narrow model input from only explicit user selections."""
+    company_name = str(company.get("name", "")).strip()
+    if not company_name:
+        raise InvalidSelectionPreparationInputError(
+            "A selected company name is required."
+        )
+    if not selected_job_axes:
+        raise InvalidSelectionPreparationInputError(
+            "At least one job-search criterion must be selected."
+        )
+    if not selected_experiences:
+        raise InvalidSelectionPreparationInputError(
+            "At least one experience must be selected."
+        )
+
+    prepared_axes = []
+    seen_axis_ids = set()
+    for axis in selected_job_axes:
+        if not isinstance(axis, dict):
+            raise InvalidSelectionPreparationInputError(
+                "A selected job-search criterion is invalid."
+            )
+        axis_id = axis.get("id")
+        criterion = axis.get("criterion")
+        description = axis.get("description", "")
+        if (
+            not isinstance(axis_id, int)
+            or isinstance(axis_id, bool)
+            or axis_id in seen_axis_ids
+            or not isinstance(criterion, str)
+            or not criterion.strip()
+            or not isinstance(description, str)
+        ):
+            raise InvalidSelectionPreparationInputError(
+                "A selected job-search criterion is invalid."
+            )
+        seen_axis_ids.add(axis_id)
+        prepared_axes.append(
+            {
+                "id": axis_id,
+                "criterion": criterion.strip(),
+                "description": description.strip(),
+            }
+        )
+
+    prepared_experiences = []
+    seen_experience_ids = set()
+    for experience in selected_experiences:
+        if not isinstance(experience, dict):
+            raise InvalidSelectionPreparationInputError(
+                "A selected experience is invalid."
+            )
+        experience_id = experience.get("id")
+        title = experience.get("title")
+        category = experience.get("category")
+        short_summary = experience.get("short_summary")
+        details = experience.get("details", "")
+        skills_tags = experience.get("skills_tags", [])
+        if (
+            not isinstance(experience_id, int)
+            or isinstance(experience_id, bool)
+            or experience_id in seen_experience_ids
+            or not isinstance(title, str)
+            or not title.strip()
+            or not isinstance(category, str)
+            or not isinstance(short_summary, str)
+            or not isinstance(details, str)
+            or not isinstance(skills_tags, list)
+            or not all(isinstance(tag, str) for tag in skills_tags)
+        ):
+            raise InvalidSelectionPreparationInputError(
+                "A selected experience is invalid."
+            )
+        seen_experience_ids.add(experience_id)
+        prepared_experiences.append(
+            {
+                "id": experience_id,
+                "title": title.strip(),
+                "category": category.strip(),
+                "short_summary": short_summary.strip(),
+                "details": details.strip(),
+                "skills_tags": [tag.strip() for tag in skills_tags if tag.strip()],
+            }
+        )
+
+    return {
+        "selected_company": {
+            "name": company_name,
+            "user_approved_company_research": {
+                field: str(company.get(field, "")).strip() or None
+                for field in COMPANY_RESEARCH_FIELDS
+            },
+        },
+        "selected_job_axes": prepared_axes,
+        "selected_experiences": prepared_experiences,
+    }
+
+
+def _validate_connection_status(item: dict[str, object], field_name: str) -> None:
+    """Validate one connection status and its safe insufficient wording."""
+    if item["status"] not in {"meaningful", "weak", "insufficient"}:
+        raise InvalidAIResponseError(f"{field_name} has an invalid status.")
+    if (
+        item["status"] == "insufficient"
+        and item["connection"] != INSUFFICIENT_CONNECTION_MESSAGE
+    ):
+        raise InvalidAIResponseError(
+            f"{field_name} does not safely represent insufficient input."
+        )
+
+
+def _validate_nonempty_strings(
+    item: dict[str, object],
+    field_names: tuple[str, ...],
+    item_name: str,
+) -> None:
+    """Require each named result field to contain non-empty text."""
+    if any(
+        not isinstance(item[field_name], str) or not item[field_name].strip()
+        for field_name in field_names
+    ):
+        raise InvalidAIResponseError(f"{item_name} contains invalid text.")
+
+
+def validate_selection_preparation_result(
+    result: object,
+    preparation_input: dict[str, object],
+) -> dict[str, object]:
+    """Validate Selection Preparation structure and selected-item provenance."""
+    required_keys = {
+        "company_axis_connections",
+        "experience_connections",
+        "combined_story_materials",
+        "interview_questions",
+        "information_gaps",
+        "limitations",
+    }
+    if not isinstance(result, dict) or set(result) != required_keys:
+        raise InvalidAIResponseError(
+            "The Selection Preparation result has an unexpected structure."
+        )
+
+    supplied_axes = {
+        int(axis["id"]): axis for axis in preparation_input["selected_job_axes"]
+    }
+    supplied_experiences = {
+        int(experience["id"]): experience
+        for experience in preparation_input["selected_experiences"]
+    }
+
+    axis_connections = result["company_axis_connections"]
+    if not isinstance(axis_connections, list):
+        raise InvalidAIResponseError("Company-axis connections must be a list.")
+    returned_axis_ids = []
+    for connection in axis_connections:
+        expected_fields = {
+            "job_axis_id",
+            "job_axis",
+            "company_basis",
+            "connection",
+            "status",
+        }
+        if not isinstance(connection, dict) or set(connection) != expected_fields:
+            raise InvalidAIResponseError("A company-axis connection is invalid.")
+        axis_id = connection["job_axis_id"]
+        if not isinstance(axis_id, int) or isinstance(axis_id, bool):
+            raise InvalidAIResponseError("A company-axis connection has an invalid ID.")
+        supplied_axis = supplied_axes.get(axis_id)
+        if supplied_axis is None or connection["job_axis"] != supplied_axis["criterion"]:
+            raise InvalidAIResponseError(
+                "A company-axis connection does not match selected input."
+            )
+        _validate_nonempty_strings(
+            connection,
+            ("job_axis", "company_basis", "connection", "status"),
+            "A company-axis connection",
+        )
+        _validate_connection_status(connection, "A company-axis connection")
+        returned_axis_ids.append(axis_id)
+    if len(returned_axis_ids) != len(set(returned_axis_ids)) or set(
+        returned_axis_ids
+    ) != set(supplied_axes):
+        raise InvalidAIResponseError(
+            "Company-axis connections do not match all selected job axes."
+        )
+
+    experience_connections = result["experience_connections"]
+    if not isinstance(experience_connections, list):
+        raise InvalidAIResponseError("Experience connections must be a list.")
+    returned_experience_ids = []
+    for connection in experience_connections:
+        expected_fields = {
+            "experience_id",
+            "experience_title",
+            "company_basis",
+            "experience_basis",
+            "connection",
+            "status",
+        }
+        if not isinstance(connection, dict) or set(connection) != expected_fields:
+            raise InvalidAIResponseError("An experience connection is invalid.")
+        experience_id = connection["experience_id"]
+        if not isinstance(experience_id, int) or isinstance(experience_id, bool):
+            raise InvalidAIResponseError("An experience connection has an invalid ID.")
+        supplied_experience = supplied_experiences.get(experience_id)
+        if (
+            supplied_experience is None
+            or connection["experience_title"] != supplied_experience["title"]
+        ):
+            raise InvalidAIResponseError(
+                "An experience connection does not match selected input."
+            )
+        _validate_nonempty_strings(
+            connection,
+            (
+                "experience_title",
+                "company_basis",
+                "experience_basis",
+                "connection",
+                "status",
+            ),
+            "An experience connection",
+        )
+        _validate_connection_status(connection, "An experience connection")
+        returned_experience_ids.append(experience_id)
+    if len(returned_experience_ids) != len(set(returned_experience_ids)) or set(
+        returned_experience_ids
+    ) != set(supplied_experiences):
+        raise InvalidAIResponseError(
+            "Experience connections do not match all selected experiences."
+        )
+
+    combined_materials = result["combined_story_materials"]
+    if not isinstance(combined_materials, list):
+        raise InvalidAIResponseError("Combined story materials must be a list.")
+    returned_pairs = set()
+    for material in combined_materials:
+        expected_fields = {
+            "job_axis_id",
+            "experience_id",
+            "company_basis",
+            "job_axis_basis",
+            "experience_basis",
+            "connection_interpretation",
+            "points_to_explain",
+        }
+        if not isinstance(material, dict) or set(material) != expected_fields:
+            raise InvalidAIResponseError("A combined story material is invalid.")
+        axis_id = material["job_axis_id"]
+        experience_id = material["experience_id"]
+        if (
+            not isinstance(axis_id, int)
+            or isinstance(axis_id, bool)
+            or axis_id not in supplied_axes
+            or not isinstance(experience_id, int)
+            or isinstance(experience_id, bool)
+            or experience_id not in supplied_experiences
+            or (axis_id, experience_id) in returned_pairs
+        ):
+            raise InvalidAIResponseError(
+                "A combined story material uses invalid selected IDs."
+            )
+        _validate_nonempty_strings(
+            material,
+            (
+                "company_basis",
+                "job_axis_basis",
+                "experience_basis",
+                "connection_interpretation",
+            ),
+            "A combined story material",
+        )
+        _validate_string_list(material["points_to_explain"], "points_to_explain")
+        returned_pairs.add((axis_id, experience_id))
+
+    for item_name, items, expected_fields in (
+        (
+            "interview question",
+            result["interview_questions"],
+            ("question", "why_prepare"),
+        ),
+        (
+            "information gap",
+            result["information_gaps"],
+            ("topic", "reason"),
+        ),
+    ):
+        if not isinstance(items, list):
+            raise InvalidAIResponseError(f"{item_name} items must be a list.")
+        for item in items:
+            if not isinstance(item, dict) or set(item) != set(expected_fields):
+                raise InvalidAIResponseError(f"A {item_name} item is invalid.")
+            _validate_nonempty_strings(item, expected_fields, f"A {item_name} item")
+
+    _validate_string_list(result["limitations"], "limitations")
+    return result
+
+
+def run_selection_preparation_analysis(
+    company: dict[str, object],
+    selected_job_axes: list[dict[str, object]],
+    selected_experiences: list[dict[str, object]],
+    *,
+    api_key: str | None = None,
+    model: str | None = None,
+    client: Any | None = None,
+) -> dict[str, object]:
+    """Make one explicit Selection Preparation request and validate its result."""
+    configured_api_key, configured_model = load_api_configuration()
+    effective_api_key = api_key if api_key is not None else configured_api_key
+    effective_model = (model or configured_model).strip()
+    if not effective_api_key:
+        raise MissingAPIKeyError("OPENAI_API_KEY is not configured.")
+
+    preparation_input = build_selection_preparation_input(
+        company,
+        selected_job_axes,
+        selected_experiences,
+    )
+    openai_client = client or OpenAI(api_key=effective_api_key)
+
+    try:
+        response = openai_client.responses.create(
+            model=effective_model,
+            instructions=SELECTION_PREPARATION_INSTRUCTIONS,
+            input=json.dumps(preparation_input, ensure_ascii=False),
+            text={
+                "format": {
+                    "type": "json_schema",
+                    "name": "careerlens_selection_preparation_v0_1",
+                    "strict": True,
+                    "schema": SELECTION_PREPARATION_RESULT_SCHEMA,
+                }
+            },
+            store=False,
+        )
+    except RateLimitError as error:
+        if (
+            getattr(error, "code", None) == "credit_balance_exhausted"
+            or getattr(error, "type", None) == "insufficient_quota"
+        ):
+            raise InsufficientQuotaError(
+                "The OpenAI API project has no available credit."
+            ) from error
+        raise AIRequestError("The OpenAI request failed.") from error
+    except Exception as error:
+        raise AIRequestError("The OpenAI request failed.") from error
+
+    output_text = getattr(response, "output_text", None)
+    if not isinstance(output_text, str) or not output_text.strip():
+        raise InvalidAIResponseError("The AI response did not contain structured text.")
+
+    try:
+        parsed_result = json.loads(output_text)
+    except json.JSONDecodeError as error:
+        raise InvalidAIResponseError("The AI response was not valid JSON.") from error
+
+    return {
+        "model": effective_model,
+        "input": preparation_input,
+        "result": validate_selection_preparation_result(
+            parsed_result,
+            preparation_input,
         ),
     }

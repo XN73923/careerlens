@@ -231,3 +231,153 @@ EVIDENCE_RESEARCH_RESULT_SCHEMA = {
     ],
     "additionalProperties": False,
 }
+
+
+INSUFFICIENT_CONNECTION_MESSAGE = "現在の入力だけでは十分な接点を整理できません。"
+
+SELECTION_PREPARATION_INSTRUCTIONS = f"""
+あなたはCareerLensの選考準備材料整理アシスタントです。
+
+以下の規則を必ず守ってください。
+
+1. supplied Company Research、明示的に選択されたjob axes、明示的に選択されたexperiencesだけを使用してください。
+2. 会社に関する外部知識・背景知識・記憶を使用せず、入力にない会社情報を作らないでください。
+3. ユーザーの経験について、入力にない出来事、役割、成果、数値、スキル、動機を作らないでください。
+4. 実績を誇張しないでください。
+5. 接点を無理に作らず、弱い場合は status を weak、十分な情報がない場合は status を insufficient としてください。
+6. status が insufficient の connection は必ず「{INSUFFICIENT_CONNECTION_MESSAGE}」にしてください。
+7. company-side basis、job-search criterion、experience-side basis、AI interpretationを明確に区別してください。
+8. connectionおよびconnection_interpretationはAIによる整理・解釈であり、客観的事実や適合性の判定として表現しないでください。
+9. fit score、matching percentage、星評価、数値スコア、企業ランキング、経験ランキングを作らないでください。
+10. 「この経験が最も適しています」のような最適経験の断定をしないでください。
+11. 完成した志望動機、ES回答、面接回答スクリプトを生成しないでください。
+12. 面接質問は選択された材料に基づく準備用の問いに限定し、面接官の期待を作らないでください。
+
+company_axis_connectionsは、選択された各job axisをIDと名称を変えずに1回ずつ扱ってください。
+experience_connectionsは、選択された各experienceをIDと名称を変えずに1回ずつ扱ってください。
+combined_story_materialsには選択されたIDだけを使用し、完成文ではなく話す内容を考えるための材料を返してください。
+網羅的に見せることより、弱い接点や不足情報を明示することを優先してください。
+""".strip()
+
+
+def _connection_status_schema() -> dict[str, object]:
+    return {
+        "type": "string",
+        "enum": ["meaningful", "weak", "insufficient"],
+    }
+
+
+SELECTION_PREPARATION_RESULT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "company_axis_connections": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "job_axis_id": {"type": "integer"},
+                    "job_axis": {"type": "string"},
+                    "company_basis": {"type": "string"},
+                    "connection": {"type": "string"},
+                    "status": _connection_status_schema(),
+                },
+                "required": [
+                    "job_axis_id",
+                    "job_axis",
+                    "company_basis",
+                    "connection",
+                    "status",
+                ],
+                "additionalProperties": False,
+            },
+        },
+        "experience_connections": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "experience_id": {"type": "integer"},
+                    "experience_title": {"type": "string"},
+                    "company_basis": {"type": "string"},
+                    "experience_basis": {"type": "string"},
+                    "connection": {"type": "string"},
+                    "status": _connection_status_schema(),
+                },
+                "required": [
+                    "experience_id",
+                    "experience_title",
+                    "company_basis",
+                    "experience_basis",
+                    "connection",
+                    "status",
+                ],
+                "additionalProperties": False,
+            },
+        },
+        "combined_story_materials": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "job_axis_id": {"type": "integer"},
+                    "experience_id": {"type": "integer"},
+                    "company_basis": {"type": "string"},
+                    "job_axis_basis": {"type": "string"},
+                    "experience_basis": {"type": "string"},
+                    "connection_interpretation": {"type": "string"},
+                    "points_to_explain": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                },
+                "required": [
+                    "job_axis_id",
+                    "experience_id",
+                    "company_basis",
+                    "job_axis_basis",
+                    "experience_basis",
+                    "connection_interpretation",
+                    "points_to_explain",
+                ],
+                "additionalProperties": False,
+            },
+        },
+        "interview_questions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "question": {"type": "string"},
+                    "why_prepare": {"type": "string"},
+                },
+                "required": ["question", "why_prepare"],
+                "additionalProperties": False,
+            },
+        },
+        "information_gaps": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "topic": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["topic", "reason"],
+                "additionalProperties": False,
+            },
+        },
+        "limitations": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+    },
+    "required": [
+        "company_axis_connections",
+        "experience_connections",
+        "combined_story_materials",
+        "interview_questions",
+        "information_gaps",
+        "limitations",
+    ],
+    "additionalProperties": False,
+}

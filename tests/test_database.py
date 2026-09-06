@@ -1206,6 +1206,98 @@ class AIResultDatabaseTests(unittest.TestCase):
             [],
         )
 
+    def test_selection_preparation_keeps_input_snapshots_after_profile_edits(
+        self,
+    ) -> None:
+        experience_id = create_experience(
+            "物流インターン",
+            "インターン",
+            "物流課題への改善案を検討",
+            "チームで課題を整理",
+            ["課題整理"],
+            self.database_path,
+        )
+        axis_id = create_job_axis(
+            "現場課題の解決",
+            "DX・ITで業務課題を改善したい。",
+            self.database_path,
+        )
+        generated_content = {
+            "version": "0.1",
+            "model": "test-model",
+            "company_id": self.first_company_id,
+            "selected_job_axis_ids": [axis_id],
+            "selected_experience_ids": [experience_id],
+            "company_research_snapshot": {
+                "name": "NEC",
+                "user_approved_company_research": {
+                    "main_business": "ITサービス"
+                },
+            },
+            "job_axes_snapshot": [
+                {
+                    "id": axis_id,
+                    "criterion": "現場課題の解決",
+                    "description": "DX・ITで業務課題を改善したい。",
+                }
+            ],
+            "experiences_snapshot": [
+                {
+                    "id": experience_id,
+                    "title": "物流インターン",
+                    "category": "インターン",
+                    "short_summary": "物流課題への改善案を検討",
+                    "details": "チームで課題を整理",
+                    "skills_tags": ["課題整理"],
+                }
+            ],
+            "generated_result": {"limitations": []},
+        }
+        result_id = create_ai_result(
+            self.first_company_id,
+            "selection_preparation_v0_1",
+            generated_content,
+            self.database_path,
+        )
+
+        update_experience(
+            experience_id,
+            "編集後の経験",
+            "課外活動",
+            "編集後の要約",
+            "編集後の詳細",
+            ["編集後"],
+            self.database_path,
+        )
+
+        saved = get_ai_result(result_id, self.database_path)
+        self.assertEqual(saved["result_type"], "selection_preparation_v0_1")
+        self.assertEqual(saved["generated_content"], generated_content)
+        self.assertEqual(
+            saved["generated_content"]["selected_job_axis_ids"],
+            [axis_id],
+        )
+        self.assertEqual(
+            saved["generated_content"]["selected_experience_ids"],
+            [experience_id],
+        )
+        self.assertEqual(
+            saved["generated_content"]["experiences_snapshot"][0]["title"],
+            "物流インターン",
+        )
+        self.assertEqual(
+            get_experience(experience_id, self.database_path)["title"],
+            "編集後の経験",
+        )
+        self.assertEqual(
+            list_ai_results(
+                self.second_company_id,
+                "selection_preparation_v0_1",
+                self.database_path,
+            ),
+            [],
+        )
+
     def test_result_type_filter_returns_only_requested_type(self) -> None:
         assistant_id = create_ai_result(
             self.first_company_id,
