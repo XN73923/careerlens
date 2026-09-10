@@ -42,10 +42,11 @@ v0.1は、個人がローカル環境で利用するシングルユーザー向�
 * UIは4つのStreamlitページで構成する
 * データはローカルのSQLiteデータベースに保存する
 * ユーザー認証は実装しない
-* 企業情報はユーザーが手動で登録・編集する
+* 企業情報はユーザーが管理する。取得済みEvidenceに基づくAI提案は自動反映せず、ユーザーがフィールド単位で確認・採用した場合のみ変更する
 * AI処理はユーザーが明示的に実行した場合のみ行う
-* LLM APIの提供元は、AI連携を実装する段階で決定する
-* ニュース・検索APIの提供元は、ニュース連携を実装する段階で決定する
+* v0.1のLLM APIにはOpenAI Responses APIを使用する
+* 公開Webページの本文取得は、ユーザーが指定したURLへの明示的な操作に限定する
+* Latest Newsおよびニュース・検索API連携はv0.1には含めない
 
 ---
 
@@ -59,9 +60,9 @@ My Profileを設定
         ↓
 企業を登録
         ↓
-企業情報と情報源を収集・整理
+企業情報と情報源を収集・整理し、必要なWeb本文をSnapshotとして保存
         ↓
-AIによる企業研究支援・最新ニュースの確認
+選択した取得済み本文を根拠にAIで企業研究を整理
         ↓
 企業情報 × 就活軸 × 経験の接点を整理
         ↓
@@ -146,13 +147,15 @@ AIは、企業の特徴や特定の面接テーマに関連しそうな経験を
 * 公開日（任意）
 * メモ
 
-企業情報と情報源はユーザーが追加・編集・削除できる。v0.1では、ニュース検索以外の企業情報を自動収集するクローラーは実装しない。
+企業情報と情報源はユーザーが追加・編集・削除できる。取得済みEvidenceに基づくAI提案はCompany Researchへ自動では書き戻さず、ユーザーが内容と根拠を確認し、フィールド単位で明示的に採用した場合のみ反映する。
+
+v0.1では、ユーザーが指定した公開URLのHTMLまたはplain text本文だけを明示的に取得し、取得時点のSnapshotとして保存する。リンク先の自動巡回やJavaScript renderingを行うWebクローラーは実装しない。
 
 ---
 
 ### 6.3 Research Assistant
 
-保存済みの企業情報と情報源をもとに、AIが企業研究の整理を支援する。Latest Newsも独立したページにはせず、このページに含める。
+保存済みの企業情報と、ユーザーが明示的に選択した取得済み本文をもとに、AIが企業研究の整理を支援する。
 
 #### AI-assisted Research
 
@@ -167,11 +170,11 @@ AIは、企業の特徴や特定の面接テーマに関連しそうな経験を
 
 AIの出力はユーザーが入力した企業情報とは区別して表示する。根拠となる保存済み情報や情報源がある場合は、それらを確認できるようにする。
 
-#### Latest News
+#### Latest News（Future Work / v0.1未実装）
 
-対象企業に関する直近のニュースを軽量な範囲で取得する。
+対象企業に関する直近のニュースを軽量な範囲で取得する構想は、将来のMilestoneとして扱う。
 
-v0.1では以下に限定する。
+将来実装する場合の初期範囲は、以下を想定する。
 
 * 過去30日または90日のニュース
 * 最大5件程度
@@ -185,7 +188,7 @@ v0.1では以下に限定する。
 
 ニュース結果は自動保存せず、ユーザーが必要と判断したものを企業の情報源として保存できるようにする。
 
-ニュース記事の全文取得、クローリング、自動監視、バックグラウンド更新はv0.1には含めない。
+ニュース記事の全文取得、クローリング、自動監視、バックグラウンド更新は将来の初期範囲にも含めない。
 
 ---
 
@@ -214,16 +217,18 @@ AIによる経験との接点は候補・提案として提示する。AIが使�
 * 「なぜこの会社か」を考えるための材料
 * 「なぜこの職種か」を考えるための材料
 * 想定される面接質問
-* 逆質問候補
+* 準備しておきたい質問
 * 追加で調べるべき内容
 
 完成したESや志望動機をAIが一方的に作成することを主目的とはしない。最終的な内容の選択、検証、表現はユーザー自身が行う。
 
 ---
 
-## 7. Initial SQLite Data Model
+## 7. v0.1 SQLite Data Model
 
-v0.1では、以下の6テーブルを使用する。AI出力の種類ごとに個別のテーブルは作成しない。
+v0.1では、`user_profile`、`job_axes`、`experiences`、`companies`、`sources`、`source_contents`、`ai_results`の7テーブルを使用する。AI出力の種類ごとに個別のテーブルは作成しない。
+
+取得した根拠は、Company → Source → Source Content Snapshot（`companies` → `sources` → `source_contents`）の関係で保持する。
 
 ### 7.1 `user_profile`
 
@@ -278,7 +283,19 @@ v0.1では、以下の6テーブルを使用する。AI出力の種類ごとに�
 * 公開日
 * メモ
 
-### 7.6 `ai_results`
+### 7.6 `source_contents`
+
+Source URLから取得した本文を、取得時点のSnapshotとして保存する。再取得時は既存本文を上書きせず、新しいSnapshotを追加する。
+
+* Source ID
+* 取得元URL・最終URL
+* ページタイトル
+* Content type
+* 取得本文
+* 文字数・省略状態
+* 取得日時・作成日時
+
+### 7.7 `ai_results`
 
 企業に対して生成されたAI支援結果を保存する。
 
@@ -289,11 +306,11 @@ v0.1では、以下の6テーブルを使用する。AI出力の種類ごとに�
 
 AI生成結果はユーザー入力データを上書きせず、別データとして保持する。生成日時を表示し、元の企業情報、就活軸、または経験が変更された場合には、結果が古くなっている可能性をユーザーが判断できるようにする。
 
-ニュース検索結果は原則として一時的に扱う。ユーザーが保存を選択したニュースは`sources`に、選択したニュースのAI要約は必要に応じて`ai_results`に保存する。
+将来のニュース検索結果は原則として一時的に扱う。ユーザーが保存を選択したニュースは`sources`に、選択したニュースのAI要約は必要に応じて`ai_results`に保存する設計を想定する。
 
 ---
 
-## 8. Initial Project Structure
+## 8. v0.1 Project Structure
 
 ```text
 careerlens/
@@ -308,17 +325,25 @@ careerlens/
 │   ├── __init__.py
 │   ├── database.py
 │   ├── ai_service.py
-│   ├── news_service.py
-│   └── prompts.py
+│   ├── source_retrieval.py
+│   ├── prompts.py
+│   └── ui.py
 │
 ├── data/
 │   └── .gitkeep
 │
 ├── tests/
-│   └── test_database.py
+│   ├── test_database.py
+│   ├── test_ai_service.py
+│   ├── test_source_retrieval.py
+│   ├── test_*_ui.py
+│   └── test_ui.py
 │
 ├── docs/
-│   └── product-requirements.md
+│   ├── product-requirements.md
+│   ├── architecture.md
+│   ├── portfolio-presentation.md
+│   └── v0.1-release-check.md
 ├── .env.example
 ├── .gitignore
 ├── requirements.txt
@@ -326,7 +351,7 @@ careerlens/
 └── LICENSE
 ```
 
-アーキテクチャは初心者にも理解しやすい構成を維持し、通常のPython関数を中心に実装する。実際の重複や必要性が生じるまでは、コントローラー層、Repositoryパターン、Dependency Injection、不要なクラス、共通UIコンポーネント層などを導入しない。
+アーキテクチャは初心者にも理解しやすい構成を維持し、通常のPython関数を中心に実装する。共通UIはdesign tokensとnavigationに限定し、コントローラー層、Repositoryパターン、Dependency Injection、不要なクラス、大規模なUI component frameworkは導入しない。
 
 ---
 
@@ -339,11 +364,13 @@ careerlens/
 5. Company Research
 6. Sources / URL management
 7. AI Research Assistant
-8. Latest News
-9. 企業情報、就活軸、経験の接点整理
-10. Selection Preparation
+8. Webpage Content Retrieval
+9. Evidence Snapshot Persistence
+10. Evidence-backed AI Research
+11. Controlled AI Adoption
+12. 企業情報、就活軸、経験の接点整理 / Selection Preparation
 
-外部APIを必要としない情報登録・保存機能を先に完成させ、その後にAIおよびニュース連携を追加する。
+外部APIを必要としない情報登録・保存機能を先に完成させ、その後にAIとWeb本文取得を追加する。Latest News連携はFuture Workとして扱う。
 
 ---
 
@@ -362,6 +389,8 @@ careerlens/
 * ニュースのバックグラウンド監視
 * 大量のニュース記事の自動収集
 * ニュース記事の全文取得
+* Latest News検索・ニュースAPI連携
+* PDF本文取得
 * Webクローラー
 * SNS情報の自動分析
 * Vector Database
@@ -370,15 +399,16 @@ careerlens/
 
 ---
 
-## 11. Initial Technology Plan
+## 11. Technology Stack
 
-現時点では以下の構成を想定する。
+v0.1では以下の構成を使用する。
 
 * **Python** — application logic
 * **Streamlit** — four-page web application UI
 * **SQLite** — local-first data storage
-* **LLM API** — AI-assisted research（提供元は実装時に決定）
-* **News / Search API** — latest company news（提供元は実装時に決定）
+* **OpenAI Responses API** — structured AI-assisted research
+* **HTTPX / Beautiful Soup** — safe webpage retrieval and text extraction
+* **pytest / unittest / Streamlit AppTest** — automated regression testing
 * **Git / GitHub** — version control and development history
 
 ライブラリは実際に必要になった段階で追加し、MVPに不要な依存関係を増やさない。技術構成は開発過程で必要に応じて変更する。
