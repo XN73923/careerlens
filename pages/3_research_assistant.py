@@ -32,6 +32,7 @@ from careerlens.database import (
     list_sources,
     update_company_field,
 )
+from careerlens.ui import apply_global_ui
 
 
 COMPANY_FIELD_LABELS = (
@@ -96,7 +97,9 @@ def render_company_snapshot(company: dict[str, object]) -> None:
     st.html(
         f"""
         <section class="assistant-snapshot">
-            <div class="assistant-content-label">USER-ENTERED</div>
+            <div class="assistant-content-label cl-provenance-label cl-provenance-user">
+                USER-ENTERED
+            </div>
             <h2>{html.escape(str(company['name']))}</h2>
             <p class="assistant-caption">Company Researchでユーザーが入力した内容</p>
             <div class="assistant-snapshot-grid">{content}</div>
@@ -127,6 +130,9 @@ def render_evidence_selector(
             st.html(
                 f"""
                 <article class="assistant-source-card">
+                    <div class="cl-provenance-label cl-provenance-source">
+                        SOURCE METADATA
+                    </div>
                     <div class="assistant-source-meta">
                         <span class="assistant-source-type">
                             {html.escape(str(source['source_type']))}
@@ -158,12 +164,15 @@ def render_evidence_selector(
         st.html(
             f"""
             <article class="assistant-source-card">
+                <div class="cl-provenance-label cl-provenance-source">
+                    SOURCE METADATA
+                </div>
                 <div class="assistant-source-meta">
                     <span class="assistant-source-type">
                         {html.escape(str(source['source_type']))}
                     </span>
                     {date_html}
-                    <strong class="is-retrieved">取得済み本文</strong>
+                    <strong class="is-retrieved">本文取得済み</strong>
                 </div>
                 <h3>{html.escape(str(source['title']))}</h3>
                 <div class="assistant-source-url">
@@ -191,7 +200,9 @@ def render_evidence_selector(
         st.html(
             f"""
             <section class="assistant-evidence-meta">
-                <div class="assistant-content-label">RETRIEVED EVIDENCE</div>
+                <div class="assistant-content-label cl-provenance-label cl-provenance-evidence">
+                    RETRIEVED EVIDENCE
+                </div>
                 <div class="assistant-evidence-grid">
                     <span>Snapshot #{int(selected_snapshot['id'])}</span>
                     <span>{html.escape(format_japan_timestamp(selected_snapshot['retrieved_at']))}</span>
@@ -582,7 +593,7 @@ def render_ai_result_record(
         st.html(
             f"""
             <section class="assistant-result-header">
-                <div class="assistant-ai-label">
+                <div class="assistant-ai-label cl-provenance-label cl-provenance-ai">
                     AI-GENERATED{' · EVIDENCE-BACKED' if is_evidence_result else ''}
                 </div>
                 <h2>{'取得済み本文に基づく企業研究' if is_evidence_result else '研究状況の整理結果'}</h2>
@@ -677,6 +688,7 @@ st.set_page_config(
     page_title="Research Assistant | CareerLens",
     page_icon="🔎",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
 
 st.html(
@@ -931,6 +943,7 @@ st.html(
     """
 )
 
+apply_global_ui()
 initialize_database()
 
 st.html(
@@ -963,7 +976,7 @@ if not companies:
     st.html(
         """
         <section class="assistant-empty-state">
-            分析する企業がまだありません。<br>
+            まだ企業が登録されていません。<br>
             先にCompany Researchで企業情報を登録してください。
         </section>
         """
@@ -1220,3 +1233,5 @@ if recent_results:
                 company=selected_company,
                 snapshots_by_id=snapshots_by_id,
             )
+else:
+    st.caption("AI整理結果はまだありません。取得済み本文を選択してAIで整理できます。")

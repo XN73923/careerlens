@@ -28,6 +28,7 @@ from careerlens.database import (
     list_experiences,
     list_job_axes,
 )
+from careerlens.ui import apply_global_ui
 
 
 COMPANY_FIELD_LABELS = (
@@ -83,7 +84,9 @@ def render_company_snapshot(company: dict[str, object]) -> None:
     st.html(
         f"""
         <section class="selection-company-card">
-            <div class="selection-content-label">USER-APPROVED COMPANY RESEARCH</div>
+            <div class="selection-content-label cl-provenance-label cl-provenance-user">
+                USER-APPROVED COMPANY RESEARCH
+            </div>
             <h2>{html.escape(str(company['name']))}</h2>
             <p>Company Researchに現在保存されている内容</p>
             <div class="selection-company-grid">{''.join(fields)}</div>
@@ -204,7 +207,9 @@ def render_preparation_result(record: dict[str, object]) -> None:
     st.html(
         f"""
         <section class="selection-result-header">
-            <div class="selection-ai-label">AI-GENERATED / SELECTION MATERIAL</div>
+            <div class="selection-ai-label cl-provenance-label cl-provenance-ai">
+                AI-GENERATED · SELECTION MATERIAL
+            </div>
             <h2>選考準備材料</h2>
             <p>話す内容を考えるための材料です。完成した志望動機や面接回答ではありません。</p>
             <div class="selection-result-meta">
@@ -315,6 +320,7 @@ st.set_page_config(
     page_title="Selection Preparation | CareerLens",
     page_icon="🔎",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
 
 st.html(
@@ -378,6 +384,21 @@ st.html(
             color: var(--cl-navy);
             font-size: 0.88rem;
             line-height: 1.65;
+        }
+        .selection-input-flow {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-wrap: wrap;
+            gap: 0.7rem 1rem;
+            margin: -0.65rem 0 2rem;
+            color: var(--cl-navy);
+            font-size: 0.84rem;
+            font-weight: 700;
+        }
+        .selection-input-flow span {
+            color: var(--cl-blue);
+            font-size: 1rem;
         }
         .selection-company-card,
         .selection-result-header {
@@ -503,8 +524,8 @@ st.html(
             font-size: 0.72rem;
             font-weight: 700;
         }
-        .selection-status.is-meaningful { background: #eef7f4; color: #2d6b58; }
-        .selection-status.is-weak { background: #fff7e8; color: #8a6521; }
+        .selection-status.is-meaningful { background: var(--cl-blue-soft); color: var(--cl-blue); }
+        .selection-status.is-weak { background: #f1f3f6; color: var(--cl-slate); }
         @media (max-width: 760px) {
             .block-container { padding-top: 2.4rem; }
             .selection-company-grid { grid-template-columns: 1fr; }
@@ -520,6 +541,7 @@ st.html(
     """
 )
 
+apply_global_ui()
 initialize_database()
 
 st.html(
@@ -536,6 +558,9 @@ st.html(
         AIは接点の整理を支援します。<br>
         どの経験を使い、何を伝えるかはユーザー自身が判断します。
     </div>
+    <div class="selection-input-flow">
+        <strong>企業情報</strong><span>×</span><strong>就活軸</strong><span>×</span><strong>経験</strong>
+    </div>
     """
 )
 
@@ -548,7 +573,7 @@ except sqlite3.Error:
     st.stop()
 
 if not companies:
-    st.info("企業情報がまだありません。先にCompany Researchで企業を登録してください。")
+    st.info("まだ企業が登録されていません。先にCompany Researchで企業を登録してください。")
     st.caption("サイドバーからCompany Researchを開いて登録できます。")
     st.stop()
 
@@ -746,3 +771,5 @@ if recent_results:
             if isinstance(content, dict):
                 render_history_summary(content)
             render_preparation_result(saved_result)
+else:
+    st.caption("選考準備材料はまだありません。就活軸と経験を選択してAIで整理できます。")

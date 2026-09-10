@@ -157,7 +157,7 @@ class SourceRetrievalUiTests(unittest.TestCase):
             )
             rendered_html = "\n".join(self.html_bodies(app))
             self.assertIn("本文取得済み", rendered_html)
-            self.assertIn("WEBPAGE CONTENT — RETRIEVED", rendered_html)
+            self.assertIn("RETRIEVED EVIDENCE", rendered_html)
             self.assertIn("URL先の公開ページから取得した本文", rendered_html)
             self.assertIn("2026/08/28 13:39 JST", rendered_html)
             self.assertIn("text/html", rendered_html)

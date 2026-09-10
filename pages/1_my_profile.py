@@ -20,6 +20,7 @@ from careerlens.database import (
     update_job_axis,
     update_user_profile,
 )
+from careerlens.ui import apply_global_ui
 
 
 def parse_target_roles(target_roles_text: str) -> list[str]:
@@ -110,7 +111,12 @@ def show_experience_feedback() -> None:
         st.success(feedback)
 
 
-st.set_page_config(page_title="My Profile | CareerLens", page_icon="🔎", layout="wide")
+st.set_page_config(
+    page_title="My Profile | CareerLens",
+    page_icon="🔎",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
 st.html(
     """
@@ -472,7 +478,7 @@ st.html(
     </style>
 
     <header class="profile-page-header">
-        <div class="profile-eyebrow">Profile 01</div>
+        <div class="profile-eyebrow">CAREERLENS / MY PROFILE</div>
         <h1 class="profile-title">My Profile</h1>
         <p class="profile-description">
             自分の就活軸や経験を整理するためのベースとなるプロフィール。
@@ -480,6 +486,8 @@ st.html(
     </header>
     """
 )
+
+apply_global_ui()
 
 try:
     initialize_database()

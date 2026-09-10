@@ -38,6 +38,7 @@ from careerlens.source_retrieval import (
     UnsupportedSourceContentTypeError,
     retrieve_webpage,
 )
+from careerlens.ui import apply_global_ui
 
 
 COMPANY_FIELDS = (
@@ -355,7 +356,9 @@ def render_company_card(company: dict[str, object]) -> None:
     st.html(
         f"""
         <article class="research-card">
-            <div class="research-card-kicker">USER-ENTERED RESEARCH</div>
+            <div class="research-card-kicker cl-provenance-label cl-provenance-user">
+                USER-ENTERED
+            </div>
             <h2>{safe_name}</h2>
             <p class="research-card-note">
                 このページの内容はユーザーが入力した調査メモです。
@@ -626,7 +629,9 @@ def render_retrieved_source_preview(
     st.html(
         f"""
         <section class="source-retrieval-panel">
-            <div class="source-retrieval-label">WEBPAGE CONTENT — RETRIEVED</div>
+            <div class="source-retrieval-label cl-provenance-label cl-provenance-evidence">
+                RETRIEVED EVIDENCE
+            </div>
             <h4>URL先の公開ページから取得した本文</h4>
             <p class="source-retrieval-title">{safe_title}</p>
             <div class="source-retrieval-url">取得元：{safe_source_url}</div>
@@ -765,6 +770,9 @@ def render_source_card(source: dict[str, object], company_id: int) -> None:
         st.html(
             f"""
             <article class="source-card-content">
+                <div class="cl-provenance-label cl-provenance-source">
+                    SOURCE METADATA
+                </div>
                 <div class="source-meta">
                     <span class="source-type">{safe_type}</span>
                     {date_html}
@@ -791,6 +799,7 @@ def render_source_card(source: dict[str, object], company_id: int) -> None:
         with retrieve_column:
             if st.button(
                 "本文を再取得" if latest_snapshot else "本文を取得",
+                type="primary",
                 use_container_width=True,
                 key=f"retrieve_source_{source_id}",
             ):
@@ -880,7 +889,9 @@ def render_sources_section(company_id: int) -> None:
     st.html(
         f"""
         <section class="sources-section-header">
-            <div class="research-section-label">SOURCE-AWARE RESEARCH</div>
+            <div class="research-section-label cl-provenance-label cl-provenance-source">
+                SOURCE METADATA
+            </div>
             <div class="sources-heading-row">
                 <div>
                     <h2>情報源</h2>
@@ -951,6 +962,7 @@ st.set_page_config(
     page_title="Company Research | CareerLens",
     page_icon="🔎",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
 
 st.html(
@@ -1490,6 +1502,7 @@ st.html(
     """
 )
 
+apply_global_ui()
 initialize_database()
 st.session_state.setdefault("company_mode", "view")
 st.session_state.setdefault("source_mode", "view")
@@ -1579,14 +1592,17 @@ with main_column:
     if mode == "create":
         render_company_form(companies)
     elif selected_company_id is None:
+        if companies:
+            empty_heading = "企業を選択してください"
+            empty_copy = "保存済みの企業を選択すると調査内容を確認できます。"
+        else:
+            empty_heading = "まだ企業が登録されていません。"
+            empty_copy = "左の「新しい企業を追加」から最初の企業を登録できます。"
         st.html(
-            """
+            f"""
             <section class="research-empty-state">
-                <h2>企業研究をはじめましょう</h2>
-                <p>
-                    左の「新しい企業を追加」から企業を登録するか、
-                    保存済みの企業を選択すると調査内容を確認できます。
-                </p>
+                <h2>{empty_heading}</h2>
+                <p>{empty_copy}</p>
             </section>
             """
         )
@@ -1613,7 +1629,6 @@ with main_column:
             with edit_column:
                 if st.button(
                     "編集",
-                    type="primary",
                     use_container_width=True,
                     key=f"edit_company_{selected_company_id}",
                 ):
