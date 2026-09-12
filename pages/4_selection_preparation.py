@@ -28,7 +28,7 @@ from careerlens.database import (
     list_experiences,
     list_job_axes,
 )
-from careerlens.ui import apply_global_ui
+from careerlens.ui import apply_global_ui, render_page_header
 
 
 COMPANY_FIELD_LABELS = (
@@ -376,8 +376,8 @@ st.html(
             line-height: 1.8;
         }
         .selection-principle {
-            margin-bottom: 2rem;
-            padding: 1rem 1.2rem;
+            margin-bottom: 0.75rem;
+            padding: 0.78rem 1.1rem;
             background: var(--cl-blue-soft);
             border: 1px solid #d7e2f1;
             border-radius: 10px;
@@ -387,18 +387,38 @@ st.html(
         }
         .selection-input-flow {
             display: flex;
-            align-items: center;
+            min-height: 70px;
+            flex-direction: column;
+            align-items: flex-start;
             justify-content: center;
-            flex-wrap: wrap;
-            gap: 0.7rem 1rem;
-            margin: -0.65rem 0 2rem;
+            gap: 0.3rem;
+            margin: 0 0 1.4rem;
+            padding: 0.7rem 1.15rem;
+            background: rgba(238, 244, 248, 0.48);
+            border: 1px solid var(--cl-border-blue, #d5dfe8);
+            border-radius: 8px;
             color: var(--cl-navy);
-            font-size: 0.84rem;
-            font-weight: 700;
         }
-        .selection-input-flow span {
+        .selection-model-label {
             color: var(--cl-blue);
-            font-size: 1rem;
+            font-size: 0.62rem;
+            font-weight: 760;
+            letter-spacing: 0.14em;
+        }
+        .selection-model-equation {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 0.55rem 1rem;
+            font-size: clamp(1.35rem, 2.2vw, 1.55rem);
+            font-weight: 760;
+            letter-spacing: -0.025em;
+            line-height: 1.2;
+        }
+        .selection-model-equation > span {
+            color: var(--cl-blue);
+            font-size: 1.15rem;
+            font-weight: 650;
         }
         .selection-company-card,
         .selection-result-header {
@@ -544,22 +564,25 @@ st.html(
 apply_global_ui()
 initialize_database()
 
+render_page_header(
+    "04",
+    "SELECTION PREPARATION",
+    "Selection Preparation",
+    "企業情報・就活軸・経験をつなぎ、面接や選考で伝える材料を整理します。",
+    legacy_prefix="selection",
+)
+
 st.html(
     """
-    <header class="selection-page-header">
-        <div class="selection-eyebrow">CAREERLENS / SELECTION PREPARATION</div>
-        <h1 class="selection-title">Selection Preparation</h1>
-        <p class="selection-description">
-            企業情報・就活軸・経験をつなぎ、<br>
-            面接や選考で伝える材料を整理します。
-        </p>
-    </header>
     <div class="selection-principle">
         AIは接点の整理を支援します。<br>
         どの経験を使い、何を伝えるかはユーザー自身が判断します。
     </div>
     <div class="selection-input-flow">
-        <strong>企業情報</strong><span>×</span><strong>就活軸</strong><span>×</span><strong>経験</strong>
+        <div class="selection-model-label">CONNECTION MODEL</div>
+        <div class="selection-model-equation">
+            <strong>企業情報</strong><span>×</span><strong>就活軸</strong><span>×</span><strong>経験</strong>
+        </div>
     </div>
     """
 )

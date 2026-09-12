@@ -38,7 +38,7 @@ from careerlens.source_retrieval import (
     UnsupportedSourceContentTypeError,
     retrieve_webpage,
 )
-from careerlens.ui import apply_global_ui
+from careerlens.ui import apply_global_ui, render_page_header
 
 
 COMPANY_FIELDS = (
@@ -1202,7 +1202,7 @@ st.html(
         }
 
         .research-action-row {
-            margin-top: 1rem;
+            margin-top: 0.35rem;
         }
 
         .research-empty-state {
@@ -1508,17 +1508,12 @@ st.session_state.setdefault("company_mode", "view")
 st.session_state.setdefault("source_mode", "view")
 st.session_state.setdefault("company_create_form_version", 0)
 
-st.html(
-    """
-    <header class="research-page-header">
-        <div class="research-eyebrow">CAREERLENS / COMPANY RESEARCH</div>
-        <h1 class="research-title">Company Research</h1>
-        <p class="research-description">
-            企業ごとの基本情報や事業、強み、DX・AIの取り組みなどを整理します。<br>
-            まずは自分で確認した情報を構造化し、後から情報源やAI分析とつなげられる形で保存します。
-        </p>
-    </header>
-    """
+render_page_header(
+    "02",
+    "COMPANY RESEARCH",
+    "Company Research",
+    "企業情報・情報源・取得済み根拠を一つの流れで整理します。",
+    legacy_prefix="research",
 )
 
 show_company_feedback()

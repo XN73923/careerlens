@@ -20,7 +20,7 @@ from careerlens.database import (
     update_job_axis,
     update_user_profile,
 )
-from careerlens.ui import apply_global_ui
+from careerlens.ui import apply_global_ui, render_page_header
 
 
 def parse_target_roles(target_roles_text: str) -> list[str]:
@@ -477,17 +477,17 @@ st.html(
         }
     </style>
 
-    <header class="profile-page-header">
-        <div class="profile-eyebrow">CAREERLENS / MY PROFILE</div>
-        <h1 class="profile-title">My Profile</h1>
-        <p class="profile-description">
-            自分の就活軸や経験を整理するためのベースとなるプロフィール。
-        </p>
-    </header>
     """
 )
 
 apply_global_ui()
+render_page_header(
+    "01",
+    "PROFILE",
+    "My Profile",
+    "就活軸・経験・志望職種を整理し、企業研究と選考準備の基準をつくります。",
+    legacy_prefix="profile",
+)
 
 try:
     initialize_database()

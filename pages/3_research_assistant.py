@@ -32,7 +32,7 @@ from careerlens.database import (
     list_sources,
     update_company_field,
 )
-from careerlens.ui import apply_global_ui
+from careerlens.ui import apply_global_ui, render_page_header
 
 
 COMPANY_FIELD_LABELS = (
@@ -751,26 +751,16 @@ st.html(
             font-size: 1rem;
             line-height: 1.8;
         }
-        .assistant-principle,
-        .assistant-limitation {
-            padding: 1rem 1.2rem;
+        .assistant-principle {
+            padding: 0.8rem 1.1rem;
             border-radius: 10px;
             font-size: 0.88rem;
-            line-height: 1.65;
-        }
-        .assistant-principle {
-            margin-bottom: 0.75rem;
+            line-height: 1.6;
+            margin-bottom: 1.65rem;
             background: var(--cl-blue-soft);
             border: 1px solid #d7e2f1;
             color: var(--cl-navy);
         }
-        .assistant-limitation {
-            margin-bottom: 2rem;
-            background: #ffffff;
-            border: 1px solid var(--cl-border);
-            color: var(--cl-slate);
-        }
-        .assistant-limitation strong { color: var(--cl-navy); }
 
         .assistant-section-header { margin: 2.2rem 0 1rem; }
         .assistant-section-header h2 {
@@ -946,22 +936,19 @@ st.html(
 apply_global_ui()
 initialize_database()
 
+render_page_header(
+    "03",
+    "RESEARCH ASSISTANT",
+    "Research Assistant",
+    "取得済みの根拠を選び、現在わかっていることと不足情報をAIと整理します。",
+    legacy_prefix="assistant",
+)
+
 st.html(
     """
-    <header class="assistant-page-header">
-        <div class="assistant-eyebrow">CAREERLENS / RESEARCH ASSISTANT</div>
-        <h1 class="assistant-title">Research Assistant</h1>
-        <p class="assistant-description">
-            保存した企業情報と情報源をもとに、<br>
-            現在わかっていること・不足していること・次に確認すべきことをAIと整理します。
-        </p>
-    </header>
     <div class="assistant-principle">
-        AIは調査を支援しますが、事実確認と最終判断はユーザーが行います。
-    </div>
-    <div class="assistant-limitation">
-        <strong>AIは、ユーザーが明示的に選択した取得済み本文だけを事実根拠として使用します。</strong><br>
-        取得本文にない会社情報は補完せず、不足している根拠として表示します。
+        AIは調査を支援します。明示的に選択した取得済み本文だけを事実根拠として使用し、<br>
+        根拠がない会社情報は補完しません。事実確認と最終判断はユーザーが行います。
     </div>
     """
 )
